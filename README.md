@@ -27,14 +27,14 @@ Codex usage is also shown (read from local Codex session files).
 
 ### Homebrew
 
-A source-build Homebrew tap is the intended package route (builds locally, so no
-Gatekeeper/notarization needed):
-
 ```bash
-brew install heymo/tap/cbar   # once the tap is published
+brew install heymokou/tap/cbar
+brew services start heymokou/tap/cbar   # run now + start at login
 ```
 
-(Until then, use `./install.sh`.)
+Builds from source on your machine (macOS only), so no Gatekeeper/notarization.
+Tap: <https://github.com/HeymoKou/homebrew-tap>. (`./install.sh` is the
+alternative if you'd rather not use Homebrew.)
 
 ## Accounts
 
