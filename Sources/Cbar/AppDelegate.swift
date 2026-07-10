@@ -16,11 +16,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusCtl.onPopoverOpen = { [weak self] in self?.store.refresh() }
         store.onUpdate = { [weak self] in
             guard let self else { return }
-            // Menu-bar icon reflects the live-polled Claude accounts only; Codex
-            // snapshots can be stale and would otherwise dim/redden the icon.
+            // Icon color reflects the ACTIVE account only (its remaining quota),
+            // so a maxed non-active account doesn't redden the icon.
             let claudeAccts = self.store.accounts.filter { $0.provider == "claude" }
-            let overall = overallHealth(claudeAccts)
-            let stale = anyStale(claudeAccts)
+            let overall = activeHealth(claudeAccts)
+            let stale = activeStale(claudeAccts)
             let active = claudeAccts.first(where: \.isActive)
             let tip = self.store.lastError
                 ?? active.map { "\($0.email) · \(Int($0.maxPct.rounded()))%" }

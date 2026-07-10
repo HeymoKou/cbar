@@ -73,6 +73,13 @@ let ha = [
             meters: [Meter(id: "5h", pct: 10, countdown: nil)], ageSeconds: 5, provider: "claude"),
 ]
 assert(overallHealth(ha) == .crit, "worst account at 100% -> crit")
+// icon uses ACTIVE account only: #1 (100%) inactive, #2 (10%) active → healthy
+assert(activeHealth(ha) == .healthy, "icon = active(#2 10%) health, ignores maxed inactive #1")
+let haCrit = [
+    Account(id: "a", number: 1, email: "a", org: "", isActive: false, status: "ok", meters: [Meter(id: "5h", pct: 5, countdown: nil)], ageSeconds: 5, provider: "claude"),
+    Account(id: "b", number: 2, email: "b", org: "", isActive: true, status: "ok", meters: [Meter(id: "5h", pct: 90, countdown: nil)], ageSeconds: 5, provider: "claude"),
+]
+assert(activeHealth(haCrit) == .crit, "active at 90% → crit")
 assert(anyStale(ha) == false, "fresh")
 assert(anyStale([Account(id: "c", number: 3, email: "c", org: "", isActive: false, status: "ok",
                          meters: [], ageSeconds: 700, provider: "claude")]) == true, "stale > 600")

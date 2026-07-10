@@ -55,6 +55,20 @@ public func anyStale(_ accounts: [Account], threshold: Double = 600) -> Bool {
     accounts.contains { ($0.ageSeconds ?? 0) > threshold }
 }
 
+/// Health of the ACTIVE account only (its tightest window). The menu-bar icon
+/// uses this so a maxed NON-active account doesn't redden the icon — the color
+/// reflects the account you're actually using.
+public func activeHealth(_ accounts: [Account]) -> Health {
+    guard let active = accounts.first(where: { $0.isActive && $0.provider != "codex" }) else { return .healthy }
+    return healthLevel(pct: active.maxPct, status: active.status)
+}
+
+/// Whether the active account's usage is stale (icon dims).
+public func activeStale(_ accounts: [Account], threshold: Double = 600) -> Bool {
+    guard let active = accounts.first(where: { $0.isActive && $0.provider != "codex" }) else { return false }
+    return (active.ageSeconds ?? 0) > threshold
+}
+
 public protocol Provider {
     var name: String { get }
     func accounts() throws -> [Account]

@@ -102,7 +102,7 @@ struct PopoverView: View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.left.arrow.right.circle.fill")
                 .font(.title3)
-                .foregroundStyle(overallHealth(claudeAccounts).color)
+                .foregroundStyle(activeHealth(claudeAccounts).color)
             VStack(alignment: .leading, spacing: 0) {
                 Text("cbar").font(.headline)
                 Text("Claude usage").font(.caption2).foregroundStyle(.secondary)
