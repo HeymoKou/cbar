@@ -6,6 +6,23 @@ public struct StoredAccount: Sendable {
     public let uuid: String?
     public let organizationUuid: String?
     public let organizationName: String?
+    public init(number: Int, email: String, uuid: String?, organizationUuid: String?, organizationName: String?) {
+        self.number = number; self.email = email; self.uuid = uuid
+        self.organizationUuid = organizationUuid; self.organizationName = organizationName
+    }
+}
+
+/// Slot whose identity matches the live `~/.claude.json` oauthAccount, or nil.
+/// Identity = (accountUuid, orgUuid), falling back to (email, orgUuid) for slots
+/// captured before uuids were stored. Never guesses on no match.
+public func matchSlot(_ accounts: [StoredAccount], live: ClaudeConfig.OAuthAccount?) -> Int? {
+    guard let live else { return nil }
+    let org = live.organizationUuid ?? ""
+    if let u = live.accountUuid,
+       let m = accounts.first(where: { $0.uuid == u && ($0.organizationUuid ?? "") == org }) { return m.number }
+    if let e = live.emailAddress,
+       let m = accounts.first(where: { $0.email == e && ($0.organizationUuid ?? "") == org }) { return m.number }
+    return nil
 }
 
 /// cbar's own managed-account store: metadata JSON in `~/.cbar/accounts.json`,
@@ -113,6 +130,20 @@ public final class AccountStore {
 
     public func setActive(_ n: Int) throws {
         var m = loadMeta(); m.activeAccountNumber = n; try saveMeta(m)
+    }
+
+    /// Reconcile the active pointer with the live Claude Code login (`/login`
+    /// happens outside cbar and moves keychain + `.claude.json` only). Returns
+    /// the effective active number; keeps the pointer on no/unknown login.
+    @discardableResult
+    public func syncActive(live: ClaudeConfig.OAuthAccount?) -> Int? {
+        let cur = activeNumber()
+        guard let m = matchSlot(list(), live: live) else { return cur }
+        if m != cur {
+            try? setActive(m)
+            CbarLog.write("active resynced #\(cur.map(String.init) ?? "nil") → #\(m) (live login \(live?.emailAddress ?? "?"))")
+        }
+        return m
     }
 
     public func remove(_ n: Int) throws {

@@ -40,10 +40,17 @@ public final class UsageService: Provider {
         try? d.write(to: URL(fileURLWithPath: cachePath))
     }
 
+    /// Creds to fetch with: the LIVE keychain for the active slot (Claude Code
+    /// keeps those fresh; the slot copy goes stale the moment CC refreshes,
+    /// which froze usage at 76% for 140 min on 2026-07-10), slot copy otherwise.
+    public static func fetchCreds(n: Int, active: Int?, live: ClaudeAiOauth?, slot: ClaudeAiOauth?) -> ClaudeAiOauth? {
+        (n == active ? live : nil) ?? slot
+    }
+
     public func accounts() throws -> [Account] {
         let now = Date().timeIntervalSince1970
         let list = store.list()
-        let active = store.activeNumber()
+        let active = store.syncActive(live: try? ClaudeConfig.readAccount())
         var cache = loadCache()
 
         let rows = list.map { a in
@@ -52,11 +59,26 @@ public final class UsageService: Provider {
         }
         let ccRunning = Self.claudeCodeRunning()
 
+        // A live token identical to a NON-active slot's copy is residue of a
+        // cbar switch racing a running Claude Code (CC rewrote `.claude.json`
+        // back, keychain kept the switched-in token) — not the active's, don't
+        // fetch with it and never heal it into the active slot.
+        var liveCreds = (try? Credentials.readActive()) ?? nil
+        if let l = liveCreds, list.contains(where: { a in
+            a.number != active && ((try? store.creds(a.number)) ?? nil)?.accessToken == l.accessToken
+        }) { liveCreds = nil }
+
         for n in fetchPlan(now: now, active: active, rows: rows) {
             var row = cache[n] ?? Row()
             row.lastAttemptAt = now                      // claim
-            guard var creds = (try? store.creds(n)) ?? nil else {
+            let slotCreds = (try? store.creds(n)) ?? nil
+            guard var creds = Self.fetchCreds(n: n, active: active, live: liveCreds, slot: slotCreds) else {
                 row.lastError = "no credentials"; cache[n] = row; continue
+            }
+            // Heal the slot backup whenever the live token has moved on.
+            if n == active, liveCreds != nil, creds.accessToken != slotCreds?.accessToken {
+                try? store.setCreds(n, creds)
+                CbarLog.write("slot #\(n) creds healed from live keychain")
             }
             if isExpired(expiresAt: creds.expiresAt) {
                 if n == active && ccRunning {
@@ -68,6 +90,9 @@ public final class UsageService: Provider {
                         if let rt = r.refresh { creds.refreshToken = rt }
                         if let sc = r.scopes { creds.scopes = sc }
                         try? store.setCreds(n, creds)
+                        // Rotation invalidates the old refresh token — the live
+                        // keychain must get the new one or CC's next refresh 401s.
+                        if n == active { try? Credentials.writeActive(creds) }
                         row.needsReauth = false
                     } catch OAuthError.needsReauth {
                         row.needsReauth = true; row.lastError = "needs re-login"; cache[n] = row; continue

@@ -105,6 +105,14 @@ try! Keychain.set(service: ks, account: ka, value: "{\"x\":1}")
 assert(try! Keychain.get(service: ks, account: ka) == "{\"x\":1}", "keychain roundtrip")
 try! Keychain.delete(service: ks, account: ka)
 assert(try! Keychain.get(service: ks, account: ka) == nil, "deleted")
+// Claude Code stores its credentials as PLAIN JSON (not base64) — cbar must
+// read that format (lenient get) and write switches back in it (setRaw), or
+// live-creds reads silently die and CC can't parse a cbar-switched item.
+let pj = #"{"claudeAiOauth":{"accessToken":"a b\"c","refreshToken":"r/t+x=","expiresAt":1}}"#
+try! Keychain.setRaw(service: ks, account: "plain", value: pj)
+assert(try! Keychain.getRaw(service: ks, account: "plain") == pj, "raw roundtrip incl. quotes/spaces/backslash")
+assert(try! Keychain.get(service: ks, account: "plain") == pj, "get tolerates plain (CC-written) values")
+try! Keychain.delete(service: ks, account: "plain")
 print("KEYCHAIN OK")
 
 // Credentials parse/serialize round-trip
@@ -210,6 +218,45 @@ let fableActive = Account(id: "1", number: 1, email: "e1", org: "", isActive: tr
 assert(switchPct(fableActive) == 20, "switchPct ignores Fable")
 assert(autoSwitchTarget(accounts: [fableActive, mkAcc(2, false, 5)], threshold: 94) == nil, "Fable 99% must not trigger (5h/7d low)")
 print("AUTOSWITCH OK")
+
+// Live-login reconciliation: /login in Claude Code must move cbar's active
+// pointer (the 2026-07-10 desync: cbar kept #1 while CC was on #3).
+func sa(_ n: Int, _ email: String, _ uuid: String?, _ org: String?) -> StoredAccount {
+    StoredAccount(number: n, email: email, uuid: uuid, organizationUuid: org, organizationName: nil)
+}
+let slots = [sa(1, "a@x.com", "U1", "O1"), sa(2, "b@x.com", "U2", "O2"), sa(3, "c@gmail.com", "U3", "O3")]
+assert(matchSlot(slots, live: .init(emailAddress: "c@gmail.com", accountUuid: "U3", organizationUuid: "O3", organizationName: nil)) == 3, "uuid+org match")
+assert(matchSlot(slots, live: .init(emailAddress: "b@x.com", accountUuid: nil, organizationUuid: "O2", organizationName: nil)) == 2, "email+org fallback when uuid missing")
+assert(matchSlot(slots, live: .init(emailAddress: "new@z.com", accountUuid: "U9", organizationUuid: "O9", organizationName: nil)) == nil, "unknown login -> nil, never guess")
+assert(matchSlot(slots, live: nil) == nil, "no live info -> nil")
+// same email in two orgs must resolve by org
+let dupEmail = [sa(1, "a@x.com", "U1", "O1"), sa(2, "a@x.com", "U1", "O2")]
+assert(matchSlot(dupEmail, live: .init(emailAddress: "a@x.com", accountUuid: "U1", organizationUuid: "O2", organizationName: nil)) == 2, "org disambiguates")
+
+// syncActive: store pointer follows the live login
+let syncDir = NSTemporaryDirectory() + "cbar-sync-\(ProcessInfo.processInfo.processIdentifier)"
+let syncSvc = "cbar-selftest-sync"
+let sst = AccountStore(dir: syncDir, keychainService: syncSvc)
+let sn1 = try sst.add(email: "a@x.com", uuid: "U1", orgUuid: "O1", orgName: nil, creds: sc)
+let sn2 = try sst.add(email: "b@x.com", uuid: "U2", orgUuid: "O2", orgName: nil, creds: sc)
+assert(sst.activeNumber() == sn1, "first added = active")
+assert(sst.syncActive(live: .init(emailAddress: "b@x.com", accountUuid: "U2", organizationUuid: "O2", organizationName: nil)) == sn2, "resync returns matched slot")
+assert(sst.activeNumber() == sn2, "pointer moved to live login")
+assert(sst.syncActive(live: nil) == sn2, "no live info -> pointer kept")
+assert(sst.syncActive(live: .init(emailAddress: "new@z.com", accountUuid: "U9", organizationUuid: "O9", organizationName: nil)) == sn2, "unknown login -> pointer kept")
+for n in [sn1, sn2] { try? Keychain.delete(service: syncSvc, account: "account-\(n)") }
+try? FileManager.default.removeItem(atPath: syncDir)
+print("ACTIVE SYNC OK")
+
+// Active account fetches with LIVE keychain creds (CC keeps them fresh); slot
+// copy only as fallback / for alternates (the 2026-07-10 401-freeze bug).
+let liveCred = ClaudeAiOauth(accessToken: "LIVE", refreshToken: "r", expiresAt: 9e15, scopes: nil)
+let slotCred = ClaudeAiOauth(accessToken: "SLOT", refreshToken: "r", expiresAt: 9e15, scopes: nil)
+assert(UsageService.fetchCreds(n: 1, active: 1, live: liveCred, slot: slotCred)?.accessToken == "LIVE", "active -> live keychain")
+assert(UsageService.fetchCreds(n: 1, active: 1, live: nil, slot: slotCred)?.accessToken == "SLOT", "active, no live -> slot fallback")
+assert(UsageService.fetchCreds(n: 2, active: 1, live: liveCred, slot: slotCred)?.accessToken == "SLOT", "alternate -> slot copy")
+assert(UsageService.fetchCreds(n: 2, active: 1, live: liveCred, slot: nil) == nil, "alternate without slot creds -> nil, never live")
+print("FETCH CREDS OK")
 
 if CommandLine.arguments.contains("--live") {
     let start = Date()

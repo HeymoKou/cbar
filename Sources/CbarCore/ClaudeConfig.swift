@@ -58,7 +58,7 @@ public enum ClaudeConfig {
         }
         obj["oauthAccount"] = oauth
         let out = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
-        try out.write(to: URL(fileURLWithPath: f))
+        try out.write(to: URL(fileURLWithPath: f), options: .atomic)   // a kill mid-write must not corrupt the login
     }
 
     /// Replace only `oauthAccount` (4 identity fields), preserving all other keys. Nil fields are

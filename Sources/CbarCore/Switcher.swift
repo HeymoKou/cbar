@@ -10,9 +10,13 @@ public struct Switcher {
     public init(store: AccountStore) { self.store = store }
 
     public func switchTo(_ number: Int) throws {
-        // Refresh the backup of the CURRENT active before overwriting it.
-        if let cur = store.activeNumber(), cur != number, let curCreds = try? Credentials.readActive() {
-            try? store.setCreds(cur, curCreds)
+        // Refresh the backup of the outgoing login before overwriting it — into
+        // the slot matching its `.claude.json` IDENTITY, not the store pointer
+        // (`/login` outside cbar moves the login without moving the pointer;
+        // pointer-addressed backup then contaminates another account's slot).
+        if let curCreds = (try? Credentials.readActive()) ?? nil,
+           let real = matchSlot(store.list(), live: try? ClaudeConfig.readAccount()) {
+            try? store.setCreds(real, curCreds)
         }
 
         guard let targetCreds = try store.creds(number) else { throw SwitchErr.noCredentials(number) }

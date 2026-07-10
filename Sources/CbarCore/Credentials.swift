@@ -42,7 +42,9 @@ public enum Credentials {
 
     public static func writeActive(_ o: ClaudeAiOauth) throws {
         let s = serialize(o)
-        try Keychain.set(service: service, account: user, value: s)
+        // Plain JSON, matching Claude Code's own format — CC reads this item
+        // back on startup and cannot parse a base64-encoded one.
+        try Keychain.setRaw(service: service, account: user, value: s)
         if FileManager.default.fileExists(atPath: filePath) {
             try? s.write(toFile: filePath, atomically: true, encoding: .utf8)
         }

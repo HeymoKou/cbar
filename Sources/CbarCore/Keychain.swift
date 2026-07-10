@@ -8,16 +8,17 @@ public enum Keychain {
     public enum KErr: Error { case failed(Int32, String) }
     private static let bin = "/usr/bin/security"
 
-    /// Returns nil when the item is absent (security rc 44).
+    /// Returns nil when the item is absent (security rc 44). Values are
+    /// base64-decoded when possible (cbar's own writes); anything else is
+    /// returned verbatim — Claude Code stores its credentials as plain JSON,
+    /// and rejecting that silently killed every live-credentials read.
     public static func get(service: String, account: String) throws -> String? {
         let (rc, out, err) = run(["find-generic-password", "-a", account, "-w", "-s", service])
         if rc == 44 { return nil }
         if rc != 0 { throw KErr.failed(rc, "get \(service): \(err)") }
-        let b64 = out.hasSuffix("\n") ? String(out.dropLast()) : out
-        guard let d = Data(base64Encoded: b64), let s = String(data: d, encoding: .utf8) else {
-            throw KErr.failed(rc, "get \(service): value not valid base64")
-        }
-        return s
+        let raw = out.hasSuffix("\n") ? String(out.dropLast()) : out
+        if let d = Data(base64Encoded: raw), let s = String(data: d, encoding: .utf8) { return s }
+        return raw
     }
 
     /// Read a value WITHOUT base64-decoding — for foreign items (e.g. cswap's
@@ -34,6 +35,18 @@ public enum Keychain {
         let cmd = "add-generic-password -U -a \"\(account)\" -s \"\(service)\" -w \(b64)\n"
         let (rc, _, err) = run(["-i"], stdin: cmd)
         if rc != 0 { throw KErr.failed(rc, "set \(service): \(err)") }
+    }
+
+    /// Write a value VERBATIM (no base64) — for the live Claude Code item,
+    /// which CC itself stores as plain JSON and must be able to parse back.
+    /// Still stdin-fed (`security -i`), with quotes/backslashes escaped.
+    public static func setRaw(service: String, account: String, value: String) throws {
+        let esc = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let cmd = "add-generic-password -U -a \"\(account)\" -s \"\(service)\" -w \"\(esc)\"\n"
+        let (rc, _, err) = run(["-i"], stdin: cmd)
+        if rc != 0 { throw KErr.failed(rc, "setRaw \(service): \(err)") }
     }
 
     public static func delete(service: String, account: String) throws {
