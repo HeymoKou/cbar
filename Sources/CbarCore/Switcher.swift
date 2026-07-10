@@ -11,11 +11,13 @@ public struct Switcher {
 
     public func switchTo(_ number: Int) throws {
         // Refresh the backup of the outgoing login before overwriting it — into
-        // the slot matching its `.claude.json` IDENTITY, not the store pointer
-        // (`/login` outside cbar moves the login without moving the pointer;
-        // pointer-addressed backup then contaminates another account's slot).
+        // the slot matching the token's PROFILE-API identity. Never local state:
+        // /login writes keychain and .claude.json non-atomically, and trusting
+        // their coherence backed one account's creds into another's slot on
+        // 2026-07-10. Profile unavailable → skip the backup (it's best-effort).
         if let curCreds = (try? Credentials.readActive()) ?? nil,
-           let real = matchSlot(store.list(), live: try? ClaudeConfig.readAccount()) {
+           let ident = try? OAuthClient().fetchProfile(accessToken: curCreds.accessToken),
+           let real = matchSlot(store.list(), live: ident) {
             try? store.setCreds(real, curCreds)
         }
 

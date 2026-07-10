@@ -40,11 +40,13 @@ public final class UsageService: Provider {
         try? d.write(to: URL(fileURLWithPath: cachePath))
     }
 
-    /// Creds to fetch with: the LIVE keychain for the active slot (Claude Code
-    /// keeps those fresh; the slot copy goes stale the moment CC refreshes,
-    /// which froze usage at 76% for 140 min on 2026-07-10), slot copy otherwise.
-    public static func fetchCreds(n: Int, active: Int?, live: ClaudeAiOauth?, slot: ClaudeAiOauth?) -> ClaudeAiOauth? {
-        (n == active ? live : nil) ?? slot
+    /// Creds to fetch with: the LIVE keychain for the slot the live token is
+    /// PROFILE-VERIFIED to belong to (CC keeps it fresh; the slot copy goes
+    /// stale the moment CC refreshes, which froze usage at 76% for 140 min on
+    /// 2026-07-10), slot copy otherwise. `liveOwner` — not the active pointer —
+    /// gates live use, so an unverified/mismatched token can never poison a row.
+    public static func fetchCreds(n: Int, liveOwner: Int?, live: ClaudeAiOauth?, slot: ClaudeAiOauth?) -> ClaudeAiOauth? {
+        (n == liveOwner ? live : nil) ?? slot
     }
 
     public func accounts() throws -> [Account] {
@@ -59,29 +61,30 @@ public final class UsageService: Provider {
         }
         let ccRunning = Self.claudeCodeRunning()
 
-        // A live token identical to a NON-active slot's copy is residue of a
-        // cbar switch racing a running Claude Code (CC rewrote `.claude.json`
-        // back, keychain kept the switched-in token) — not the active's, don't
-        // fetch with it and never heal it into the active slot.
-        var liveCreds = (try? Credentials.readActive()) ?? nil
-        if let l = liveCreds, list.contains(where: { a in
-            a.number != active && ((try? store.creds(a.number)) ?? nil)?.accessToken == l.accessToken
-        }) { liveCreds = nil }
+        // Live creds are used/healed ONLY for the slot matching the token's
+        // PROFILE-API identity — never attributed by pointer or .claude.json
+        // (non-atomic /login writes poisoned slot creds AND usage rows on
+        // 2026-07-10). Profile unreachable → liveOwner nil → slot copies only.
+        let liveCreds = (try? Credentials.readActive()) ?? nil
+        let liveOwner: Int? = liveCreds.flatMap { c in
+            (try? oauth.fetchProfile(accessToken: c.accessToken)).flatMap { matchSlot(list, live: $0) }
+        }
 
         for n in fetchPlan(now: now, active: active, rows: rows) {
             var row = cache[n] ?? Row()
             row.lastAttemptAt = now                      // claim
             let slotCreds = (try? store.creds(n)) ?? nil
-            guard var creds = Self.fetchCreds(n: n, active: active, live: liveCreds, slot: slotCreds) else {
+            guard var creds = Self.fetchCreds(n: n, liveOwner: liveOwner, live: liveCreds, slot: slotCreds) else {
                 row.lastError = "no credentials"; cache[n] = row; continue
             }
-            // Heal the slot backup whenever the live token has moved on.
-            if n == active, liveCreds != nil, creds.accessToken != slotCreds?.accessToken {
+            // Heal the slot backup whenever the live token has moved on —
+            // only into the profile-verified owner slot.
+            if n == liveOwner, creds.accessToken != slotCreds?.accessToken {
                 try? store.setCreds(n, creds)
-                CbarLog.write("slot #\(n) creds healed from live keychain")
+                CbarLog.write("slot #\(n) creds healed from live keychain (profile-verified)")
             }
             if isExpired(expiresAt: creds.expiresAt) {
-                if n == active && ccRunning {
+                if n == liveOwner && ccRunning {
                     // Claude Code is using this token — serve cache, don't rotate it.
                 } else {
                     do {
@@ -92,7 +95,8 @@ public final class UsageService: Provider {
                         try? store.setCreds(n, creds)
                         // Rotation invalidates the old refresh token — the live
                         // keychain must get the new one or CC's next refresh 401s.
-                        if n == active { try? Credentials.writeActive(creds) }
+                        // Only for the verified owner of the live item.
+                        if n == liveOwner { try? Credentials.writeActive(creds) }
                         row.needsReauth = false
                     } catch OAuthError.needsReauth {
                         row.needsReauth = true; row.lastError = "needs re-login"; cache[n] = row; continue

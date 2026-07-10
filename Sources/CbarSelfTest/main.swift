@@ -120,7 +120,31 @@ let credJson = #"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expires
 let cred = Credentials.parse(credJson)!
 assert(cred.accessToken == "a" && cred.refreshToken == "r" && Int(cred.expiresAt) == 1783672677350)
 assert(Credentials.parse(Credentials.serialize(cred))!.refreshToken == "r", "creds roundtrip")
+// `security -i` is a LINE-based command parser: a multi-line serialized blob
+// splits into garbage commands — on 2026-07-10 this DESTROYED the live login
+// item mid-switch (first JSON line overwrote it with "{"). serialize must stay
+// single-line; setRaw must refuse newlines BEFORE touching the keychain.
+assert(!Credentials.serialize(cred).contains("\n"), "serialize must be single-line for security -i")
+try! Keychain.setRaw(service: ks, account: "nl", value: "precious")
+do {
+    try Keychain.setRaw(service: ks, account: "nl", value: "{\n  \"a\": 1\n}")
+    assert(false, "setRaw must throw on multi-line value")
+} catch {}
+assert(try! Keychain.getRaw(service: ks, account: "nl") == "precious",
+       "failed setRaw must NOT corrupt the existing item")
+try? Keychain.delete(service: ks, account: "nl")
 print("CREDS OK")
+
+// Token identity from the profile API — the ONLY trustworthy owner-of-token
+// source. Local (.claude.json, keychain) pairs are written non-atomically by
+// /login; trusting their instantaneous coherence cross-contaminated slot creds
+// on 2026-07-10. Any creds write into a slot must match PROFILE identity.
+let profJson = #"{"account":{"uuid":"AU1","email_address":"p@x.com","full_name":"P"},"organization":{"uuid":"OU1","name":"POrg"}}"#
+let prof = ProfileMapper.account(from: Data(profJson.utf8))
+assert(prof?.emailAddress == "p@x.com" && prof?.accountUuid == "AU1", "profile account fields")
+assert(prof?.organizationUuid == "OU1" && prof?.organizationName == "POrg", "profile org fields")
+assert(ProfileMapper.account(from: Data("{}".utf8)) == nil, "empty profile -> nil, never a guessed identity")
+print("PROFILE MAP OK")
 
 // ClaudeConfig splice preserves all other keys
 let tmp = NSTemporaryDirectory() + "cbar-cfg-\(ProcessInfo.processInfo.processIdentifier).json"
@@ -248,14 +272,16 @@ for n in [sn1, sn2] { try? Keychain.delete(service: syncSvc, account: "account-\
 try? FileManager.default.removeItem(atPath: syncDir)
 print("ACTIVE SYNC OK")
 
-// Active account fetches with LIVE keychain creds (CC keeps them fresh); slot
-// copy only as fallback / for alternates (the 2026-07-10 401-freeze bug).
+// The PROFILE-VERIFIED owner slot fetches with LIVE keychain creds (CC keeps
+// them fresh; slot copies go stale — the 2026-07-10 401-freeze bug). Everyone
+// else uses their slot copy; an unverified live token is used by NO ONE.
 let liveCred = ClaudeAiOauth(accessToken: "LIVE", refreshToken: "r", expiresAt: 9e15, scopes: nil)
 let slotCred = ClaudeAiOauth(accessToken: "SLOT", refreshToken: "r", expiresAt: 9e15, scopes: nil)
-assert(UsageService.fetchCreds(n: 1, active: 1, live: liveCred, slot: slotCred)?.accessToken == "LIVE", "active -> live keychain")
-assert(UsageService.fetchCreds(n: 1, active: 1, live: nil, slot: slotCred)?.accessToken == "SLOT", "active, no live -> slot fallback")
-assert(UsageService.fetchCreds(n: 2, active: 1, live: liveCred, slot: slotCred)?.accessToken == "SLOT", "alternate -> slot copy")
-assert(UsageService.fetchCreds(n: 2, active: 1, live: liveCred, slot: nil) == nil, "alternate without slot creds -> nil, never live")
+assert(UsageService.fetchCreds(n: 1, liveOwner: 1, live: liveCred, slot: slotCred)?.accessToken == "LIVE", "verified owner -> live keychain")
+assert(UsageService.fetchCreds(n: 1, liveOwner: 1, live: nil, slot: slotCred)?.accessToken == "SLOT", "owner, no live -> slot fallback")
+assert(UsageService.fetchCreds(n: 2, liveOwner: 1, live: liveCred, slot: slotCred)?.accessToken == "SLOT", "non-owner -> slot copy")
+assert(UsageService.fetchCreds(n: 2, liveOwner: nil, live: liveCred, slot: slotCred)?.accessToken == "SLOT", "unverified live -> slot copy only")
+assert(UsageService.fetchCreds(n: 2, liveOwner: 1, live: liveCred, slot: nil) == nil, "non-owner without slot creds -> nil, never live")
 print("FETCH CREDS OK")
 
 if CommandLine.arguments.contains("--live") {

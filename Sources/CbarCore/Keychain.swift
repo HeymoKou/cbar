@@ -40,7 +40,13 @@ public enum Keychain {
     /// Write a value VERBATIM (no base64) — for the live Claude Code item,
     /// which CC itself stores as plain JSON and must be able to parse back.
     /// Still stdin-fed (`security -i`), with quotes/backslashes escaped.
+    /// `security -i` is LINE-based: a newline in the value would split into
+    /// garbage commands after the first line has already OVERWRITTEN the item
+    /// (destroyed the live login on 2026-07-10) — refuse before touching it.
     public static func setRaw(service: String, account: String, value: String) throws {
+        guard !value.contains("\n"), !value.contains("\r") else {
+            throw KErr.failed(-2, "setRaw \(service): value contains newline (would corrupt item via security -i)")
+        }
         let esc = value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")

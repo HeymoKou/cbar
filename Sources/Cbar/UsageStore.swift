@@ -75,8 +75,10 @@ final class UsageStore {
                 try self.switcher.switchTo(target)
                 CbarLog.write("auto-switch OK → #\(target)")
             } catch {
-                CbarLog.write("auto-switch FAILED → #\(target): \(error)")
-                DispatchQueue.main.async { self.lastAutoSwitchAt = nil }   // allow retry next poll
+                // Keep the cooldown: resetting it here turned one failure into
+                // a 5+/sec retry storm (2026-07-10) that kept corrupting the
+                // live login and rotated the log over its own evidence.
+                CbarLog.write("auto-switch FAILED → #\(target): \(error) (retry after cooldown)")
             }
             self.refresh()
         }

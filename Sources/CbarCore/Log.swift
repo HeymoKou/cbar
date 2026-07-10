@@ -15,7 +15,11 @@ public enum CbarLog {
         let url = URL(fileURLWithPath: path)
         if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
            let size = attrs[.size] as? Int, size > cap {
-            try? Data(line.utf8).write(to: url)   // reset when too big
+            // Rotate, don't truncate — truncation destroyed the evidence of the
+            // 2026-07-10 retry storm mid-incident.
+            try? FileManager.default.removeItem(atPath: path + ".1")
+            try? FileManager.default.moveItem(atPath: path, toPath: path + ".1")
+            try? Data(line.utf8).write(to: url)
             return
         }
         if let h = try? FileHandle(forWritingTo: url) {

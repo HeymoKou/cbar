@@ -18,6 +18,7 @@ public func isExpired(expiresAt: Double, now_ms: Double = Date().timeIntervalSin
 /// always completes and signals, so no thread/leak is stranded.
 public struct OAuthClient {
     static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    static let profileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
     static let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     static let beta = "oauth-2025-04-20"
@@ -33,6 +34,36 @@ public struct OAuthClient {
         if code == 429 { throw OAuthError.http(429, retryAfter: retryAfter) }
         if code >= 400 { throw OAuthError.http(code, retryAfter: nil) }
         return data
+    }
+
+    /// WHO owns this token, from the API itself — the only trustworthy identity
+    /// source. Local (.claude.json, keychain) pairs are written non-atomically
+    /// by /login, so their instantaneous coherence must never be trusted for
+    /// creds attribution (2026-07-10 cross-contamination). Cached per token.
+    public func fetchProfile(accessToken: String) throws -> ClaudeConfig.OAuthAccount {
+        if let hit = Self.profileCache.value(for: accessToken) { return hit }
+        var r = URLRequest(url: Self.profileURL, timeoutInterval: 5)
+        r.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        r.setValue(Self.beta, forHTTPHeaderField: "anthropic-beta")
+        r.setValue(Self.ua, forHTTPHeaderField: "User-Agent")
+        let (data, code, retryAfter) = try send(r)
+        if code == 429 { throw OAuthError.http(429, retryAfter: retryAfter) }
+        if code >= 400 { throw OAuthError.http(code, retryAfter: nil) }
+        guard let acc = ProfileMapper.account(from: data) else { throw OAuthError.badResponse }
+        Self.profileCache.set(acc, for: accessToken)
+        return acc
+    }
+
+    /// Token → identity cache (tokens rotate ~hourly; polls are 60 s — without
+    /// this every poll would burn a profile call). Thread-safe, capped.
+    static let profileCache = ProfileCache()
+    public final class ProfileCache {
+        private var map: [String: ClaudeConfig.OAuthAccount] = [:]
+        private let q = DispatchQueue(label: "cbar.profile-cache")
+        func value(for token: String) -> ClaudeConfig.OAuthAccount? { q.sync { map[token] } }
+        func set(_ v: ClaudeConfig.OAuthAccount, for token: String) {
+            q.sync { if map.count > 32 { map.removeAll() }; map[token] = v }
+        }
     }
 
     /// Returns refreshed fields; caller merges into stored creds.
@@ -75,6 +106,21 @@ public struct OAuthClient {
         sem.wait()
         if netErr { throw OAuthError.network }
         return (outData ?? Data(), status, retryAfter)
+    }
+}
+
+/// Maps the profile API response to identity fields. Nil on anything missing —
+/// a guessed identity is worse than none.
+public enum ProfileMapper {
+    public static func account(from data: Data) -> ClaudeConfig.OAuthAccount? {
+        guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let acc = o["account"] as? [String: Any],
+              let email = acc["email_address"] as? String,
+              let uuid = acc["uuid"] as? String else { return nil }
+        let org = o["organization"] as? [String: Any]
+        return ClaudeConfig.OAuthAccount(emailAddress: email, accountUuid: uuid,
+                                         organizationUuid: org?["uuid"] as? String,
+                                         organizationName: org?["name"] as? String)
     }
 }
 

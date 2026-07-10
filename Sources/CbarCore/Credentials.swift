@@ -29,7 +29,10 @@ public enum Credentials {
     }
 
     public static func serialize(_ o: ClaudeAiOauth) -> String {
-        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // Single-line (compact) on purpose: the value passes through
+        // `security -i`, a line-based parser — a newline splits the write into
+        // garbage commands and destroys the item. CC's own format is compact too.
+        let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
         let data = (try? enc.encode(Wrapper(claudeAiOauth: o))) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
