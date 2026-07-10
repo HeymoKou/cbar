@@ -1,7 +1,7 @@
 # cbar
 
 Native macOS menu-bar monitor for your Claude accounts' usage — 5h / 7d / Fable
-per account, one-click switching, and a color-coded icon. **Fully self-contained
+per account, one-click **and automatic** switching, and a color-coded icon. **Fully self-contained
 Swift**: it talks to Claude's OAuth usage API directly and manages account
 credentials in the macOS Keychain. No cswap, no Python, no runtime dependencies.
 Codex usage is also shown (read from local Codex session files).
@@ -47,6 +47,26 @@ brew install heymo/tap/cbar   # once the tap is published
 - **Switch** — click an account to make it active (writes `~/.claude.json` +
   Keychain, with backup + rollback; new Claude sessions pick it up).
 - **Remove** — the ✕ on a non-active account.
+
+## Auto-switch
+
+When the **active** account's usage reaches a threshold, cbar automatically
+switches to the account with the most headroom (lowest usage) — the native
+equivalent of `cswap auto`. It only switches if a better account exists, with a
+120 s cooldown to avoid churn; Codex is never a switch target.
+
+Configure via `~/.cbar/config.json` (edit the file; no restart needed to re-read
+on the next poll):
+
+```json
+{
+  "autoSwitchEnabled": true,
+  "autoSwitchThreshold": 94
+}
+```
+
+Defaults: enabled, threshold `94`. Set `autoSwitchEnabled` to `false` for
+manual-only. A switch is logged to Console as `cbar: auto-switch → #N`.
 
 ## How it stays safe
 
