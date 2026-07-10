@@ -50,10 +50,11 @@ alternative if you'd rather not use Homebrew.)
 
 ## Auto-switch
 
-When the **active** account's usage reaches a threshold, cbar automatically
-switches to the account with the most headroom (lowest usage) — the native
-equivalent of `cswap auto`. It only switches if a better account exists, with a
-120 s cooldown to avoid churn; Codex is never a switch target.
+When the **active** account's **5h / 7d** usage reaches a threshold (Fable and
+spend are deliberately excluded, matching cswap), cbar automatically switches to
+the account with the most 5h/7d headroom — the native equivalent of `cswap auto`.
+It only switches if a better account exists, with a 120 s cooldown to avoid
+churn; Codex is never a switch target.
 
 Configure via `~/.cbar/config.json` (edit the file; no restart needed to re-read
 on the next poll):
@@ -66,13 +67,14 @@ on the next poll):
 ```
 
 Defaults: enabled, threshold `94`. Set `autoSwitchEnabled` to `false` for
-manual-only. A switch is logged to Console as `cbar: auto-switch → #N`.
+manual-only. Every check and switch decision is logged to `~/.cbar/cbar.log`
+(`tail -f ~/.cbar/cbar.log` to watch why it did or didn't fire).
 
 ## How it stays safe
 
 - **Rate-limit safe:** the usage endpoint is per-account rate-limited, so cbar
-  paces fetches (active account + at most one stalest alternate per 30 s) with
-  per-account backoff honoring `Retry-After`.
+  paces fetches — each 60 s poll refreshes every account that's stale (>30 s),
+  with per-account exponential backoff honoring `Retry-After` on 429.
 - **Never breaks your login:** switching backs up the current account and rolls
   back on any error; the active account's token is never refreshed while Claude
   Code is running.
@@ -89,8 +91,9 @@ swift run CbarSelfTest --live     # live OAuth fetch for the active account + Co
 
 ## Icon colors
 
-Reflect the **worst** Claude account: green `<60%`, orange `60–85%`, red `>85%`
-or any error. Dimmed = data older than 10 min.
+Reflect the **active** Claude account (a maxed-out alternate no longer reddens
+the icon): green `<60%`, orange `60–85%`, red `>85%` or any error. Dimmed =
+active account's data older than 10 min.
 
 ## Uninstall
 
@@ -105,14 +108,12 @@ rm -rf ~/Applications/Cbar.app
 
 Distribute as **source, built locally** (not a prebuilt download): a locally
 built `.app` isn't quarantined, so it runs with no Gatekeeper prompt and needs no
-Apple Developer signing/notarization. Share the repo; they run `./install.sh` and
-add their own accounts. Before making the repo **public**, scrub any real emails
-from the design docs.
+Apple Developer signing/notarization. Share the repo (or the Homebrew tap); they
+run `./install.sh` and add their own accounts.
 
 ## Roadmap
 
-Codex live API (currently local-file), spend/extra-usage display, more providers,
-a published Homebrew tap.
+Codex live API (currently local-file), spend/extra-usage display, more providers.
 
 ## Credits
 
