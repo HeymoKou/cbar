@@ -22,8 +22,13 @@ public struct PaceRow: Sendable {
     }
 }
 
-/// Which accounts a single refresh pass may hit the network for: the active
-/// account (if due) plus AT MOST ONE stalest due alternate. O(1) per TTL.
+/// Which accounts a single refresh pass hits the network for: EVERY account
+/// that is stale (older than `serveTTL`), not backing off, and not just claimed.
+/// At the 60 s poll this syncs all accounts each cycle; per-account backoff (on
+/// 429) is the burst safety-net, so it self-regulates near the sustainable rate.
+/// Active first, then stalest.
+/// ponytail: full pass is fine for a handful of accounts; if someone ever runs
+/// dozens, cap the non-active count here and rotate.
 public func fetchPlan(now: Double, active: Int?, rows: [PaceRow],
                       serveTTL: Double = 30, claimTTL: Double = 10) -> [Int] {
     func eligible(_ r: PaceRow) -> Bool {
@@ -36,7 +41,7 @@ public func fetchPlan(now: Double, active: Int?, rows: [PaceRow],
     if let active, let ar = rows.first(where: { $0.number == active }), eligible(ar) {
         plan.append(active)
     }
-    let alts = rows.filter { $0.number != active && eligible($0) }
+    let others = rows.filter { $0.number != active && eligible($0) }
         .sorted { a, b in
             switch (a.fetchedAt, b.fetchedAt) {
             case (nil, nil): return a.number < b.number
@@ -45,6 +50,6 @@ public func fetchPlan(now: Double, active: Int?, rows: [PaceRow],
             case let (x?, y?): return x < y        // oldest first
             }
         }
-    if let stalest = alts.first { plan.append(stalest.number) }
+    plan.append(contentsOf: others.map(\.number))
     return plan
 }

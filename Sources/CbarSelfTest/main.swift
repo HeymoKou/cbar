@@ -135,13 +135,15 @@ let t0 = 1_000_000.0
 let pr = [
     PaceRow(number: 1, fetchedAt: t0 - 5, backoffUntil: nil, lastAttemptAt: nil),   // fresh (<30s) → skip
     PaceRow(number: 2, fetchedAt: nil, backoffUntil: nil, lastAttemptAt: nil),        // active, never fetched
-    PaceRow(number: 3, fetchedAt: t0 - 100, backoffUntil: nil, lastAttemptAt: nil),   // stale
+    PaceRow(number: 3, fetchedAt: t0 - 100, backoffUntil: nil, lastAttemptAt: nil),   // stale → fetch
     PaceRow(number: 4, fetchedAt: t0 - 500, backoffUntil: t0 + 60, lastAttemptAt: nil), // backing off → skip
+    PaceRow(number: 5, fetchedAt: t0 - 80, backoffUntil: nil, lastAttemptAt: nil),    // stale → fetch
 ]
 let plan = fetchPlan(now: t0, active: 2, rows: pr)
 assert(plan.first == 2, "active first")
-assert(plan.contains(3) && !plan.contains(1) && !plan.contains(4), "one stalest alt, skip fresh/backoff")
-assert(plan.count == 2, "active + 1 alt only")
+assert(plan.contains(3) && plan.contains(5), "full pass: all stale fetched")
+assert(!plan.contains(1) && !plan.contains(4), "skip fresh + backoff")
+assert(plan.count == 3, "active + all eligible (not capped at 1)")
 print("PACING OK")
 
 // Auto-switch target selection
