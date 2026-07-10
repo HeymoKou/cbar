@@ -18,12 +18,20 @@ public struct CbarConfig {
     }
 }
 
-/// The account number to auto-switch TO, or nil. Fires only when the active
-/// Claude account has reached `threshold` AND a switchable account with more
-/// headroom exists (returns the one with the most headroom = lowest max %).
+/// Usage % that drives switching — max of the 5h and 7d windows ONLY, matching
+/// cswap (`headroom = 100 - max(five_hour, seven_day)`; Fable/scoped and spend
+/// are deliberately excluded from switch decisions).
+public func switchPct(_ a: Account) -> Double {
+    a.meters.filter { $0.id == "5h" || $0.id == "7d" }.map(\.pct).max() ?? 0
+}
+
+/// The account number to auto-switch TO, or nil. Like `cswap auto`: fires only
+/// when the ACTIVE Claude account's 5h/7d usage has reached `threshold` AND a
+/// switchable account with more headroom exists (returns the one with the most
+/// 5h/7d headroom).
 public func autoSwitchTarget(accounts: [Account], threshold: Double) -> Int? {
     let claude = accounts.filter { $0.provider == "claude" }
-    guard let active = claude.first(where: { $0.isActive }), active.maxPct >= threshold else { return nil }
-    let candidates = claude.filter { !$0.isActive && $0.switchable && !$0.meters.isEmpty && $0.maxPct < active.maxPct }
-    return candidates.min(by: { $0.maxPct < $1.maxPct })?.number
+    guard let active = claude.first(where: { $0.isActive }), switchPct(active) >= threshold else { return nil }
+    let candidates = claude.filter { !$0.isActive && $0.switchable && !$0.meters.isEmpty && switchPct($0) < switchPct(active) }
+    return candidates.min(by: { switchPct($0) < switchPct($1) })?.number
 }

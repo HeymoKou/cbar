@@ -1,6 +1,42 @@
 import Foundation
 import CbarCore
 
+// One-shot: LIVE end-to-end auto-switch diagnosis against the real store/login.
+if CommandLine.arguments.contains("--autoswitch-test") {
+    func cfgActive() -> String {
+        (try? ClaudeConfig.readAccount())?.flatMap { $0 }?.emailAddress ?? "?"
+    }
+    let store = AccountStore(); let sw = Switcher(store: store); let svc = UsageService()
+    let original = store.activeNumber()
+    print("START: config active=\(cfgActive()) store#=\(store.activeNumber().map(String.init) ?? "nil")")
+
+    // 1) switch active -> #2 (teamacct, the maxed one)
+    do { try sw.switchTo(2); print("[1] switchTo(#2) OK") }
+    catch { print("[1] switchTo(#2) FAILED: \(error)") }
+    print("    config active now=\(cfgActive()) store#=\(store.activeNumber().map(String.init) ?? "nil")")
+
+    // 2) build accounts (cache-based meters returned even if refetch 429s)
+    let accts = (try? svc.accounts()) ?? []
+    let act = accts.first(where: { $0.isActive })
+    print("[2] active acct=#\(act?.number ?? -1) \(act?.email ?? "?") maxPct=\(Int(act?.maxPct ?? 0))%")
+
+    // 3) evaluate + perform auto-switch
+    let cfg = CbarConfig.load()
+    print("[3] config: enabled=\(cfg.autoSwitchEnabled) threshold=\(Int(cfg.autoSwitchThreshold))")
+    if let target = autoSwitchTarget(accounts: accts, threshold: cfg.autoSwitchThreshold) {
+        print("    autoSwitchTarget=#\(target) → rotating")
+        do { try sw.switchTo(target); print("    rotated to #\(target) OK") }
+        catch { print("    ROTATE FAILED: \(error)") }
+    } else {
+        print("    autoSwitchTarget=nil (would NOT rotate)")
+    }
+    print("    config active after rotate=\(cfgActive())")
+
+    // 4) restore original active
+    if let original { try? sw.switchTo(original); print("[4] restored active to #\(original) (\(cfgActive()))") }
+    exit(0)
+}
+
 // One-shot: exercise the native UsageService against the real store.
 if CommandLine.arguments.contains("--service") {
     let svc = UsageService()
@@ -155,6 +191,12 @@ assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10), mkAc
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 50), mkAcc(2, false, 10)], threshold: 94) == nil, "below threshold -> no switch")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 96)], threshold: 94) == nil, "no better account -> no switch")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10, provider: "codex")], threshold: 94) == nil, "codex not a switch target")
+// cswap alignment: Fable/scoped excluded — 5h/7d low → no trigger even if Fable maxed
+let fableActive = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
+                          meters: [Meter(id: "5h", pct: 10, countdown: nil), Meter(id: "7d", pct: 20, countdown: nil), Meter(id: "Fbl", pct: 99, countdown: nil)],
+                          ageSeconds: 1, provider: "claude")
+assert(switchPct(fableActive) == 20, "switchPct ignores Fable")
+assert(autoSwitchTarget(accounts: [fableActive, mkAcc(2, false, 5)], threshold: 94) == nil, "Fable 99% must not trigger (5h/7d low)")
 print("AUTOSWITCH OK")
 
 if CommandLine.arguments.contains("--live") {

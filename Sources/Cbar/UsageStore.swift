@@ -58,9 +58,19 @@ final class UsageStore {
         guard let target = autoSwitchTarget(accounts: accounts, threshold: cfg.autoSwitchThreshold) else { return }
         if let last = lastAutoSwitchAt, Date().timeIntervalSince(last) < autoSwitchCooldown { return }
         guard let acc = accounts.first(where: { $0.number == target && $0.provider == "claude" }) else { return }
-        lastAutoSwitchAt = Date()
-        NSLog("cbar: auto-switch → #\(target) \(acc.email) (active hit \(Int(cfg.autoSwitchThreshold))%)")
-        switchTo(acc)
+        lastAutoSwitchAt = Date()   // prevent re-entry while the async switch runs
+        NSLog("cbar: auto-switch triggered → #\(target) \(acc.email) (active ≥ \(Int(cfg.autoSwitchThreshold))%)")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.switcher.switchTo(target)
+                NSLog("cbar: auto-switch OK → #\(target)")
+            } catch {
+                NSLog("cbar: auto-switch FAILED → #\(target): \(error)")
+                DispatchQueue.main.async { self.lastAutoSwitchAt = nil }   // allow retry next poll
+            }
+            self.refresh()
+        }
     }
 
     func switchTo(_ account: Account) {
