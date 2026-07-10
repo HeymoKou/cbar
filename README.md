@@ -114,6 +114,21 @@ from the design docs.
 Codex live API (currently local-file), spend/extra-usage display, more providers,
 a published Homebrew tap.
 
+## Credits
+
+cbar isn't a solo idea — it stands on two open-source projects. It's an
+**independent Swift reimplementation, not a fork** (no code is copied), and is
+not affiliated with either:
+
+- **[ClaudeBar](https://github.com/tddworks/ClaudeBar)** by tddworks — the
+  inspiration for the menu-bar usage-monitor look & feel.
+- **[claude-swap](https://github.com/realiti4/claude-swap)** by realiti4 — the
+  multi-account model and threshold auto-switch idea, and the (undocumented)
+  Claude OAuth usage/refresh protocol that cbar reimplements, were learned from
+  its open-source code.
+
+Thanks to both.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
