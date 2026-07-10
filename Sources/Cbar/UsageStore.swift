@@ -55,18 +55,27 @@ final class UsageStore {
     private func maybeAutoSwitch() {
         let cfg = CbarConfig.load()
         guard cfg.autoSwitchEnabled else { return }
+        // Observability: log the active account's switch-usage + decision each poll,
+        // so it's visible in Console why auto-switch does or doesn't fire.
+        if let active = accounts.first(where: { $0.isActive && $0.provider == "claude" }) {
+            let err = active.meters.isEmpty ? " (no usage data — stale/rate-limited/expired token)" : ""
+            CbarLog.write("auto-switch check active #\(active.number) \(active.email) 5h/7d=\(Int(switchPct(active)))% thr=\(Int(cfg.autoSwitchThreshold))%\(err)")
+        }
         guard let target = autoSwitchTarget(accounts: accounts, threshold: cfg.autoSwitchThreshold) else { return }
-        if let last = lastAutoSwitchAt, Date().timeIntervalSince(last) < autoSwitchCooldown { return }
+        if let last = lastAutoSwitchAt, Date().timeIntervalSince(last) < autoSwitchCooldown {
+            CbarLog.write("auto-switch WANTED → #\(target) but in cooldown")
+            return
+        }
         guard let acc = accounts.first(where: { $0.number == target && $0.provider == "claude" }) else { return }
         lastAutoSwitchAt = Date()   // prevent re-entry while the async switch runs
-        NSLog("cbar: auto-switch triggered → #\(target) \(acc.email) (active ≥ \(Int(cfg.autoSwitchThreshold))%)")
+        CbarLog.write("auto-switch triggered → #\(target) \(acc.email) (active ≥ \(Int(cfg.autoSwitchThreshold))%)")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
                 try self.switcher.switchTo(target)
-                NSLog("cbar: auto-switch OK → #\(target)")
+                CbarLog.write("auto-switch OK → #\(target)")
             } catch {
-                NSLog("cbar: auto-switch FAILED → #\(target): \(error)")
+                CbarLog.write("auto-switch FAILED → #\(target): \(error)")
                 DispatchQueue.main.async { self.lastAutoSwitchAt = nil }   // allow retry next poll
             }
             self.refresh()
