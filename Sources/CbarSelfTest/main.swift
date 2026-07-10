@@ -138,6 +138,11 @@ assert(um[1].id == "7d" && Int(um[1].pct) == 71, "7d util")
 assert(um[2].id == "Fbl" && Int(um[2].pct) == 88, "scoped percent")
 assert(isExpired(expiresAt: 1000, now_ms: 800_000), "expired")
 assert(!isExpired(expiresAt: 10_000_000_000_000, now_ms: 1000), "not expired")
+// reset countdown: fractional-seconds resets_at must parse (was the "no reset time" bug)
+let usageReset = #"{"five_hour":{"utilization":50.0,"resets_at":"2035-01-02T03:04:05.326186+00:00"}}"#
+let mr = try UsageMapper.meters(from: Data(usageReset.utf8))
+assert(mr.first?.countdown != nil, "fractional resets_at must yield a countdown (not nil)")
+assert(mr.first!.countdown!.contains("d"), "far-future reset → days countdown, got \(mr.first!.countdown!)")
 print("OAUTH MAP OK")
 
 // AccountStore on throwaway dir + keychain service

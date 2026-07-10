@@ -106,12 +106,22 @@ public enum UsageMapper {
     }
 
     static func countdown(_ iso: String?) -> String? {
-        guard let iso, let d = ISO8601DateFormatter().date(from: iso) else { return nil }
+        guard let iso, let d = parseISO(iso) else { return nil }
         let s = Int(d.timeIntervalSinceNow)
         if s <= 0 { return "now" }
         let dd = s / 86400, h = (s % 86400) / 3600, mn = (s % 3600) / 60
         if dd > 0 { return "\(dd)d \(h)h" }
         if h > 0 { return "\(h)h \(mn)m" }
         return "\(mn)m"
+    }
+
+    /// The usage API's `resets_at` carries fractional seconds (e.g.
+    /// "2026-07-09T17:50:00.326186+00:00"), which the default ISO8601 parser
+    /// rejects — try fractional first, then plain.
+    static func parseISO(_ s: String) -> Date? {
+        let f1 = ISO8601DateFormatter(); f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter(); f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: s)
     }
 }
