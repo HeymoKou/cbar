@@ -1,0 +1,188 @@
+import Foundation
+import CbarCore
+
+// One-shot: exercise the native UsageService against the real store.
+if CommandLine.arguments.contains("--service") {
+    let svc = UsageService()
+    for pass in 1...2 {
+        let start = Date()
+        let accts = try svc.accounts()
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+        print("PASS \(pass) (\(ms)ms):")
+        for a in accts {
+            let mstr = a.meters.map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " ")
+            print("  #\(a.number) \(a.email) active=\(a.isActive) status=\(a.status) age=\(a.ageSeconds.map { "\(Int($0))s" } ?? "-") [\(mstr)]")
+        }
+    }
+    exit(0)
+}
+
+// One-shot: import cswap accounts into cbar's real store, then exit.
+if CommandLine.arguments.contains("--import-cswap") {
+    let store = AccountStore()
+    let n = try CswapImport.importAll(into: store)
+    print("IMPORTED \(n) accounts; store now: \(store.list().map { "#\($0.number) \($0.email)" }.joined(separator: ", ")); active=\(store.activeNumber().map(String.init) ?? "nil")")
+    exit(0)
+}
+
+// health rules + aggregation (Accounts built directly; no cswap)
+assert(healthLevel(pct: 100, status: "ok") == .crit)
+assert(healthLevel(pct: 70, status: "ok") == .warn)
+assert(healthLevel(pct: 10, status: "ok") == .healthy)
+assert(healthLevel(pct: 10, status: "rate_limited") == .crit)
+let ha = [
+    Account(id: "a", number: 1, email: "a", org: "", isActive: false, status: "ok",
+            meters: [Meter(id: "5h", pct: 100, countdown: nil)], ageSeconds: 5, provider: "claude"),
+    Account(id: "b", number: 2, email: "b", org: "", isActive: true, status: "ok",
+            meters: [Meter(id: "5h", pct: 10, countdown: nil)], ageSeconds: 5, provider: "claude"),
+]
+assert(overallHealth(ha) == .crit, "worst account at 100% -> crit")
+assert(anyStale(ha) == false, "fresh")
+assert(anyStale([Account(id: "c", number: 3, email: "c", org: "", isActive: false, status: "ok",
+                         meters: [], ageSeconds: 700, provider: "claude")]) == true, "stale > 600")
+print("HEALTH OK")
+
+// Codex session rate-limit parsing (local jsonl, no API).
+let codexLine = #"{"timestamp":"2026-07-09T16:37:40.997Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":5.0,"window_minutes":300,"resets_at":2000003600},"secondary":{"used_percent":12.0,"window_minutes":10080,"resets_at":2000090000},"plan_type":"team"}}}"#
+let cx = CodexProvider.parse(codexLine, now: 2000000000)
+assert(cx != nil, "codex parse returned nil")
+assert(cx!.provider == "codex" && cx!.switchable == false)
+assert(cx!.meters.count == 2)
+assert(Int(cx!.meters[0].pct) == 5 && cx!.meters[0].id == "5h")
+assert(Int(cx!.meters[1].pct) == 12 && cx!.meters[1].id == "7d")
+assert(cx!.meters[0].countdown == "1h 0m", "5h countdown: \(cx!.meters[0].countdown ?? "nil")")
+assert(cx!.org == "OpenAI · team")
+print("CODEX OK: \(cx!.meters.map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " "))")
+
+// Keychain round-trip on a throwaway service
+let ks = "cbar-selftest", ka = "rt"
+try? Keychain.delete(service: ks, account: ka)
+assert((try? Keychain.get(service: ks, account: ka)) == .some(nil), "absent should be nil")
+try! Keychain.set(service: ks, account: ka, value: "{\"x\":1}")
+assert(try! Keychain.get(service: ks, account: ka) == "{\"x\":1}", "keychain roundtrip")
+try! Keychain.delete(service: ks, account: ka)
+assert(try! Keychain.get(service: ks, account: ka) == nil, "deleted")
+print("KEYCHAIN OK")
+
+// Credentials parse/serialize round-trip
+let credJson = #"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1783672677350,"scopes":["user:inference"]}}"#
+let cred = Credentials.parse(credJson)!
+assert(cred.accessToken == "a" && cred.refreshToken == "r" && Int(cred.expiresAt) == 1783672677350)
+assert(Credentials.parse(Credentials.serialize(cred))!.refreshToken == "r", "creds roundtrip")
+print("CREDS OK")
+
+// ClaudeConfig splice preserves all other keys
+let tmp = NSTemporaryDirectory() + "cbar-cfg-\(ProcessInfo.processInfo.processIdentifier).json"
+let original = #"{"numStartups":42,"oauthAccount":{"emailAddress":"old@x.com","organizationUuid":"O1"},"projects":{"/a":{"x":1}},"telemetry":true}"#
+try! original.write(toFile: tmp, atomically: true, encoding: .utf8)
+try! ClaudeConfig.spliceAccount(.init(emailAddress: "new@y.com", accountUuid: "U2", organizationUuid: "O2", organizationName: "Org"), at: tmp)
+let after = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: tmp))) as! [String: Any]
+assert((after["numStartups"] as? Int) == 42, "preserve numStartups")
+assert((after["telemetry"] as? Bool) == true, "preserve telemetry")
+assert(((after["projects"] as? [String: Any])?["/a"] as? [String: Any])?["x"] as? Int == 1, "preserve projects")
+let oa = after["oauthAccount"] as! [String: Any]
+assert((oa["emailAddress"] as? String) == "new@y.com" && (oa["organizationUuid"] as? String) == "O2", "spliced")
+let reread = try! ClaudeConfig.readAccount(at: tmp)!
+assert(reread.emailAddress == "new@y.com" && reread.accountUuid == "U2")
+// full oauthAccount splice preserves other top-level keys + replaces all oauth fields
+try! ClaudeConfig.spliceRawAccount(["accountUuid": "U9", "emailAddress": "z@z.com", "billingType": "pro", "seatTier": "x"], at: tmp)
+let after2 = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: tmp))) as! [String: Any]
+assert((after2["numStartups"] as? Int) == 42 && (after2["telemetry"] as? Bool) == true, "raw splice preserves keys")
+let oa2 = after2["oauthAccount"] as! [String: Any]
+assert((oa2["billingType"] as? String) == "pro" && (oa2["seatTier"] as? String) == "x" && oa2.count == 4, "full oauth replaced")
+try? FileManager.default.removeItem(atPath: tmp)
+print("CONFIG SPLICE OK")
+
+// OAuth usage mapping (utilization vs percent) + expiry math
+let usageJson = #"{"five_hour":{"utilization":42.0,"resets_at":null},"seven_day":{"utilization":71},"limits":[{"scope":{"model":{"display_name":"Fable"}},"percent":88.0}]}"#
+let um = try UsageMapper.meters(from: Data(usageJson.utf8))
+assert(um.count == 3, "usage meters count \(um.count)")
+assert(um[0].id == "5h" && Int(um[0].pct) == 42, "5h util")
+assert(um[1].id == "7d" && Int(um[1].pct) == 71, "7d util")
+assert(um[2].id == "Fbl" && Int(um[2].pct) == 88, "scoped percent")
+assert(isExpired(expiresAt: 1000, now_ms: 800_000), "expired")
+assert(!isExpired(expiresAt: 10_000_000_000_000, now_ms: 1000), "not expired")
+print("OAUTH MAP OK")
+
+// AccountStore on throwaway dir + keychain service
+let storeDir = NSTemporaryDirectory() + "cbar-store-\(ProcessInfo.processInfo.processIdentifier)"
+let storeSvc = "cbar-selftest-store"
+let store = AccountStore(dir: storeDir, keychainService: storeSvc)
+let sc = ClaudeAiOauth(accessToken: "AT", refreshToken: "RT", expiresAt: 1783672677350, scopes: ["user:inference"])
+let n1 = try store.add(email: "a@x.com", uuid: "U1", orgUuid: "O1", orgName: "Org", creds: sc)
+assert(store.list().count == 1 && store.list()[0].email == "a@x.com", "store add")
+assert(store.activeNumber() == n1, "first = active")
+let c1 = try store.creds(n1)
+assert(c1?.accessToken == "AT", "creds back")
+let n2 = try store.add(email: "a@x.com", uuid: "U1", orgUuid: "O1", orgName: "Org", creds: sc) // re-capture same identity
+assert(n1 == n2 && store.list().count == 1, "re-capture dedup")
+try store.remove(n1)
+let cAfter = try store.creds(n1)
+assert(store.list().isEmpty && cAfter == nil, "removed")
+try? Keychain.delete(service: storeSvc, account: "account-\(n1)")
+try? FileManager.default.removeItem(atPath: storeDir)
+print("STORE OK")
+
+// Pacing: backoff caps + fetch plan
+assert(backoff(failures: 1, retryAfter: nil) == 30, "backoff n1")
+assert(backoff(failures: 5, retryAfter: nil) == 480, "backoff n5")
+assert(backoff(failures: 10, retryAfter: nil) == 600, "backoff cap")
+assert(backoff(failures: 1, retryAfter: 0) == 30, "edge min(30,120)")
+assert(backoff(failures: 10, retryAfter: 0) == 120, "edge cap 120")
+assert(backoff(failures: 1, retryAfter: 500) == 500, "burst honor")
+assert(backoff(failures: 1, retryAfter: 5000) == 900, "burst cap 900")
+let t0 = 1_000_000.0
+let pr = [
+    PaceRow(number: 1, fetchedAt: t0 - 5, backoffUntil: nil, lastAttemptAt: nil),   // fresh (<30s) → skip
+    PaceRow(number: 2, fetchedAt: nil, backoffUntil: nil, lastAttemptAt: nil),        // active, never fetched
+    PaceRow(number: 3, fetchedAt: t0 - 100, backoffUntil: nil, lastAttemptAt: nil),   // stale
+    PaceRow(number: 4, fetchedAt: t0 - 500, backoffUntil: t0 + 60, lastAttemptAt: nil), // backing off → skip
+]
+let plan = fetchPlan(now: t0, active: 2, rows: pr)
+assert(plan.first == 2, "active first")
+assert(plan.contains(3) && !plan.contains(1) && !plan.contains(4), "one stalest alt, skip fresh/backoff")
+assert(plan.count == 2, "active + 1 alt only")
+print("PACING OK")
+
+// Auto-switch target selection
+func mkAcc(_ n: Int, _ active: Bool, _ pct: Double, provider: String = "claude") -> Account {
+    Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: "ok",
+            meters: [Meter(id: "5h", pct: pct, countdown: nil)], ageSeconds: 1, provider: provider)
+}
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10), mkAcc(3, false, 50)], threshold: 94) == 2, "switch to most headroom")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 50), mkAcc(2, false, 10)], threshold: 94) == nil, "below threshold -> no switch")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 96)], threshold: 94) == nil, "no better account -> no switch")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10, provider: "codex")], threshold: 94) == nil, "codex not a switch target")
+print("AUTOSWITCH OK")
+
+if CommandLine.arguments.contains("--live") {
+    let start = Date()
+    let live = try UsageService().accounts()
+    let ms = Int(Date().timeIntervalSince(start) * 1000)
+    print("USAGE LIVE: \(live.count) accounts in \(ms)ms")
+    for a in live {
+        let mstr = a.meters.map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " ")
+        print("  #\(a.number) \(a.email) active=\(a.isActive) status=\(a.status) [\(mstr)]")
+    }
+
+    let cxStart = Date()
+    let cxAccts = try CodexProvider().accounts()
+    let cxMs = Int(Date().timeIntervalSince(cxStart) * 1000)
+    if let cx = cxAccts.first {
+        print("CODEX LIVE: \(cx.email) [\(cx.org)] in \(cxMs)ms — " +
+              cx.meters.map { "\($0.id)=\(Int($0.pct))% (\($0.countdown ?? "—"))" }.joined(separator: " ") +
+              " age=\(cx.ageSeconds.map { "\(Int($0))s" } ?? "?")")
+    } else {
+        print("CODEX LIVE: no session rate-limit data found (\(cxMs)ms)")
+    }
+
+    // native OAuth usage fetch for the active account (meaningful once 429 clears)
+    if let cred = try Credentials.readActive() {
+        do {
+            let d = try OAuthClient().fetchUsageRaw(accessToken: cred.accessToken)
+            print("OAUTH LIVE:", try UsageMapper.meters(from: d).map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " "))
+        } catch { print("OAUTH LIVE err:", error) }
+    } else {
+        print("OAUTH LIVE: no active credentials found")
+    }
+}
