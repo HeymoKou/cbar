@@ -205,8 +205,13 @@ public final class UsageService: Provider {
                 row.lastError = "unauthorized"
             } catch OAuthError.http(429, let ra) {
                 row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: ra)
+                let wait = backoff(failures: row.failures, retryAfter: ra)
+                row.backoffUntil = now + wait
                 row.lastError = "rate limited"
+                // The only durable record of pacing pressure: `lastError` lives in
+                // the cache and is overwritten next pass, so without this there is
+                // no way to tell whether a pacing change worked (2026-07-25).
+                CbarLog.write("fetch #\(n) 429 — retry-after=\(ra.map { String(Int($0)) } ?? "-") failures=\(row.failures) backoff=\(Int(wait))s")
             } catch {
                 row.failures += 1
                 row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)

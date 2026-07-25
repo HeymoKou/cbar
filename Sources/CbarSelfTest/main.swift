@@ -235,10 +235,28 @@ let pr = [
     PaceRow(number: 5, fetchedAt: t0 - 80, backoffUntil: nil, lastAttemptAt: nil),    // stale → fetch
 ]
 let plan = fetchPlan(now: t0, active: 2, rows: pr)
-assert(plan.first == 2, "active first")
-assert(plan.contains(3) && plan.contains(5), "full pass: all stale fetched")
+assert(plan == [2], "never-fetched active is stalest of all → wins")
+// One request per pass. The old full pass spent the whole rate budget on the
+// active slot and starved every other one behind it (see `fetchPlan`).
+assert(plan.count <= 1, "one account per pass")
 assert(!plan.contains(1) && !plan.contains(4), "skip fresh + backoff")
-assert(plan.count == 3, "active + all eligible (not capped at 1)")
+
+// Rotation: whatever was just fetched becomes freshest, so the next pass moves
+// on by itself — no cursor. #9 active and recent, so it must not hog the slot.
+var rot = [
+    PaceRow(number: 8, fetchedAt: t0 - 100, backoffUntil: nil, lastAttemptAt: nil),
+    PaceRow(number: 9, fetchedAt: t0 - 60, backoffUntil: nil, lastAttemptAt: nil),   // active, fresh enough
+    PaceRow(number: 10, fetchedAt: t0 - 200, backoffUntil: nil, lastAttemptAt: nil),
+]
+assert(fetchPlan(now: t0, active: 9, rows: rot) == [10], "stalest wins, active has no standing priority")
+rot[2] = PaceRow(number: 10, fetchedAt: t0, backoffUntil: nil, lastAttemptAt: t0 - 20)
+assert(fetchPlan(now: t0, active: 9, rows: rot) == [8], "next pass rotates to the new stalest")
+// ...but the active slot may not lag past what auto-switch can tolerate.
+let staleActive = [
+    PaceRow(number: 8, fetchedAt: t0 - 300, backoffUntil: nil, lastAttemptAt: nil),
+    PaceRow(number: 9, fetchedAt: t0 - 200, backoffUntil: nil, lastAttemptAt: nil),   // active, past 180 s
+]
+assert(fetchPlan(now: t0, active: 9, rows: staleActive) == [9], "aged-out active preempts a staler alternate")
 // A re-login must break out of backoff. Slot #2 accumulated 125 failures, so
 // backoff sat at its 600 s cap; the skip meant the dead slot copy was never
 // healed from the live keychain, and the un-healed copy caused the next failure.
@@ -248,7 +266,33 @@ assert(fetchPlan(now: t0, active: 7, rows: backedOff, credsChanged: [7]) == [7],
 // But claimTTL must still hold, or ignoring backoff becomes a per-poll storm.
 let justTried = [PaceRow(number: 7, fetchedAt: t0 - 900, backoffUntil: t0 + 500, lastAttemptAt: t0 - 2)]
 assert(fetchPlan(now: t0, active: 7, rows: justTried, credsChanged: [7]).isEmpty, "claim window still applies")
-print("PACING OK")
+
+// Starvation is a property of the SEQUENCE of passes, not of any one plan, so
+// single-pass asserts cannot see it — the shipped bug passed every assert above.
+// Drive an hour of 60 s polls over 3 accounts and check what each one actually
+// gets. The old "active first, then everyone" plan pinned #2 at every pass and
+// left #1/#3 to the 429 backoff.
+var simFetched: [Int: Double] = [:]
+var picks: [Int: Int] = [:]
+var worstAge: [Int: Double] = [:]
+for tick in 0..<60 {
+    let now = t0 + Double(tick) * 60
+    for n in [1, 2, 3] {
+        worstAge[n] = max(worstAge[n] ?? 0, simFetched[n].map { now - $0 } ?? 0)
+    }
+    let rows = [1, 2, 3].map {
+        PaceRow(number: $0, fetchedAt: simFetched[$0], backoffUntil: nil, lastAttemptAt: nil)
+    }
+    let p = fetchPlan(now: now, active: 2, rows: rows)
+    assert(p.count <= 1, "budget is one request per pass")
+    if let n = p.first { simFetched[n] = now; picks[n, default: 0] += 1 }
+}
+assert(picks.count == 3, "every account gets served — none starves")
+// 300 s is what `isSwitchTarget` demands of a switch destination; a slot that
+// ages past it silently stops being selectable.
+assert(worstAge.values.allSatisfy { $0 <= 300 }, "no slot ages out of switch eligibility: \(worstAge)")
+assert((picks[2] ?? 0) >= (picks[1] ?? 0), "active served at least as often as an alternate")
+print("PACING OK (rotation over 60 passes: \(picks.sorted { $0.key < $1.key }.map { "#\($0.key)×\($0.value)" }.joined(separator: " ")), worst staleness \(Int(worstAge.values.max() ?? 0))s)")
 
 // Auto-switch target selection
 func mkAcc(_ n: Int, _ active: Bool, _ pct: Double, provider: String = "claude") -> Account {
