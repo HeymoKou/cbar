@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      # The self-test creates and deletes throwaway login-Keychain items, which
+      # works on the runner. CBAR_LOG_SILENT keeps it from writing phantom
+      # switch decisions into a log the README tells you to trust.
+      - name: Self-test
+        run: swift run CbarSelfTest
+        env:
+          CBAR_LOG_SILENT: "1"
+      - name: Release build
+        run: ./build.sh

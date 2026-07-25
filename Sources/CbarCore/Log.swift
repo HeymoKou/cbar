@@ -16,8 +16,7 @@ public enum CbarLog {
         if silenced { return }
         let f = ISO8601DateFormatter()
         let line = "\(f.string(from: Date())) \(msg)\n"
-        let dir = (path as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? SecureFile.ensureDir((path as NSString).deletingLastPathComponent)
         let url = URL(fileURLWithPath: path)
         if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
            let size = attrs[.size] as? Int, size > cap {
@@ -25,7 +24,7 @@ public enum CbarLog {
             // 2026-07-10 retry storm mid-incident.
             try? FileManager.default.removeItem(atPath: path + ".1")
             try? FileManager.default.moveItem(atPath: path, toPath: path + ".1")
-            try? Data(line.utf8).write(to: url)
+            try? SecureFile.write(Data(line.utf8), to: path)
             return
         }
         if let h = try? FileHandle(forWritingTo: url) {
@@ -33,7 +32,10 @@ public enum CbarLog {
             h.seekToEndOfFile()
             h.write(Data(line.utf8))
         } else {
-            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+            try? SecureFile.write(Data(line.utf8), to: path)
         }
+        // The log is appended to, so it only gets its mode at creation — and the
+        // 0644 one left by earlier versions never would. Cheap enough per line.
+        SecureFile.tighten(path)
     }
 }

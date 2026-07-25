@@ -35,9 +35,7 @@ public final class UsageService: Provider {
         let raw = Dictionary(uniqueKeysWithValues: c.map { (String($0.key), $0.value) })
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let d = try? enc.encode(raw) else { return }
-        try? FileManager.default.createDirectory(
-            atPath: (cachePath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-        try? d.write(to: URL(fileURLWithPath: cachePath))
+        try? SecureFile.write(d, to: cachePath)
     }
 
     /// Creds to fetch with: the LIVE keychain for the slot the live token is

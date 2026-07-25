@@ -56,9 +56,8 @@ public final class AccountStore {
         return m
     }
     private func saveMeta(_ m: Meta) throws {
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(m).write(to: URL(fileURLWithPath: metaPath))
+        try SecureFile.write(try enc.encode(m), to: metaPath)
     }
 
     // MARK: reads

@@ -3,7 +3,11 @@ import Foundation
 /// Minimal config, read from `~/.cbar/config.json` (edit the file to change).
 /// Lenient: missing keys keep defaults.
 public struct CbarConfig {
-    public var autoSwitchEnabled: Bool = true
+    /// OFF by default, deliberately. Auto-switch rewrites the live Claude Code
+    /// keychain item and `~/.claude.json` on its own schedule; someone who
+    /// installed what the README calls a usage monitor must not get that without
+    /// asking for it. Opting in is one line in `~/.cbar/config.json`.
+    public var autoSwitchEnabled: Bool = false
     public var autoSwitchThreshold: Double = 93   // switch when active account's 5h hits this %
 
     public static func load(dir: String = "\(NSHomeDirectory())/.cbar") -> CbarConfig {

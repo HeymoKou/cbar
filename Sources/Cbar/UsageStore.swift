@@ -18,6 +18,35 @@ final class UsageStore {
     private var lastAutoSwitchAt: Date?
     private let autoSwitchCooldown: TimeInterval = 120
 
+    /// EVERY credential mutation runs here, one at a time. These paths used to
+    /// take independent global-queue slots: the 60 s timer, opening the popover,
+    /// the Refresh button, a manual switch, and auto-switch could all be in
+    /// flight together. Two of them matter together — `UsageService.accounts()`
+    /// rotates refresh tokens, and `Switcher.switchTo` rewrites the live keychain
+    /// item and `~/.claude.json`. Interleaved, they can submit the same rotating
+    /// refresh token twice (which revokes the token family) or leave credentials
+    /// and account metadata describing different accounts. Serial is fast enough:
+    /// a pass is one network fetch, and a queued click waits under a second.
+    private let work = DispatchQueue(label: "com.heymo.cbar.mutations", qos: .userInitiated)
+
+    /// Run a mutation on the serial queue and put its failure where the user can
+    /// see it. These were `try?` — a switch or a capture could fail with no
+    /// message, no log line, and no visible change, so the only symptom was the
+    /// menu not doing anything.
+    private func mutate(_ what: String, _ body: @escaping () throws -> Void) {
+        work.async { [weak self] in
+            var err: String?
+            do { try body() } catch {
+                err = "\(what): \(error)"
+                CbarLog.write("\(what) FAILED: \(error)")
+            }
+            // Hand the message to the refresh rather than setting it here: the
+            // refresh that follows every mutation assigns `lastError` itself, so
+            // setting it first just means the user never sees it.
+            self?.refresh(carrying: err)
+        }
+    }
+
     init() {
         usage = UsageService(store: store)
         switcher = Switcher(store: store)
@@ -33,12 +62,15 @@ final class UsageStore {
         }
     }
 
-    func refresh() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+    /// `carrying` is a mutation's failure message, which outranks anything the
+    /// refresh itself hits — the user clicked a thing and it didn't work, and
+    /// that is what they need told. Cleared by the next ordinary poll.
+    func refresh(carrying: String? = nil) {
+        work.async { [weak self] in
             guard let self else { return }
             var accs: [Account] = []
-            var err: String?
-            do { accs = try self.usage.accounts() } catch { err = "\(error)" }
+            var err: String? = carrying
+            do { accs = try self.usage.accounts() } catch { err = err ?? "\(error)" }
             accs += (try? self.codex.accounts()) ?? []
             DispatchQueue.main.async {
                 self.accounts = accs
@@ -69,7 +101,7 @@ final class UsageStore {
         guard let acc = accounts.first(where: { $0.number == target && $0.provider == "claude" }) else { return }
         lastAutoSwitchAt = Date()   // prevent re-entry while the async switch runs
         CbarLog.write("auto-switch triggered → #\(target) \(acc.email) (active ≥ \(Int(cfg.autoSwitchThreshold))%)")
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        work.async { [weak self] in
             guard let self else { return }
             do {
                 try self.switcher.switchTo(target)
@@ -85,10 +117,7 @@ final class UsageStore {
     }
 
     func switchTo(_ account: Account) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            try? self?.switcher.switchTo(account.number)
-            self?.refresh()
-        }
+        mutate("switch to #\(account.number)") { [switcher] in try switcher.switchTo(account.number) }
     }
 
     func switchToBest() {
@@ -100,25 +129,15 @@ final class UsageStore {
     }
 
     func addCurrent() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            _ = try? self?.store.addCurrent()
-            self?.refresh()
-        }
+        mutate("add current account") { [store] in _ = try store.addCurrent() }
     }
 
     func remove(_ number: Int) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            try? self?.store.remove(number)
-            self?.refresh()
-        }
+        mutate("remove #\(number)") { [store] in try store.remove(number) }
     }
 
     func importCswap() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            _ = try? CswapImport.importAll(into: self.store)
-            self.refresh()
-        }
+        mutate("import from cswap") { [store] in _ = try CswapImport.importAll(into: store) }
     }
 
     var cacheAgeText: String {

@@ -10,6 +10,30 @@ Codex usage is also shown (read from local Codex session files).
 > macOS Keychain (`/usr/bin/security`) and reads Claude Code's local config
 > (`~/.claude.json`, `~/.claude/`). It does not run on Linux or Windows.
 
+## Disclaimer — read before installing
+
+cbar is an unofficial, unaffiliated personal project. It is not from Anthropic,
+not endorsed by Anthropic, and not supported by Anthropic.
+
+- **It uses undocumented endpoints.** Usage and token refresh go to
+  `api.anthropic.com/api/oauth/*` and `platform.claude.com/v1/oauth/token` using
+  the OAuth client ID that ships inside Claude Code. There is no public API for
+  this. Anthropic can change or revoke any of it without notice, at which point
+  cbar simply stops working.
+- **Rotating between multiple subscription accounts may violate Anthropic's
+  [Consumer Terms](https://www.anthropic.com/legal/consumer-terms),** which
+  restrict automated access and circumventing usage limits. Accounts have been
+  suspended for less. That risk is yours, not the author's, and no amount of
+  careful engineering in this repo changes it. Auto-switching is off by default
+  for exactly this reason — turning it on is a decision you make knowingly.
+- **It writes your live Claude Code credentials.** Switching accounts rewrites
+  the `Claude Code-credentials` Keychain item and `~/.claude.json`. A bug here
+  costs you a re-login, and in the worst case a revoked token family that needs
+  `/login` on every affected account.
+
+Use at your own risk. The MIT license covers cbar's own code; it grants no right
+to use Anthropic's service, OAuth client, or trademarks.
+
 ## Requirements
 
 - **macOS 14+** (Sonoma or later).
@@ -50,7 +74,12 @@ alternative if you'd rather not use Homebrew.)
 
 ## Auto-switch
 
-cbar switches away from the **active** account when either is true:
+**Off by default.** cbar monitors only until you turn this on; nothing rewrites
+your login on its own until you do. See the Disclaimer above before enabling it.
+Set `autoSwitchEnabled` to `true` in `~/.cbar/config.json` (no restart needed —
+it's re-read on the next poll).
+
+Once enabled, cbar switches away from the **active** account when either is true:
 
 - its **5h** usage reaches `autoSwitchThreshold`, or
 - its **7d** usage reaches **99%** — a hard ceiling, not a ranking input.
@@ -79,24 +108,39 @@ on the next poll):
 }
 ```
 
-Defaults: enabled, threshold `93`. Set `autoSwitchEnabled` to `false` for
-manual-only. Every check and switch decision is logged to `~/.cbar/cbar.log`
-(`tail -f ~/.cbar/cbar.log` to watch why it did or didn't fire).
+Defaults: **disabled**, threshold `93`. Every check and switch decision is logged
+to `~/.cbar/cbar.log` (`tail -f ~/.cbar/cbar.log` to watch why it did or didn't
+fire).
 
-## How it stays safe
+## Engineering safeguards
 
-- **Rate-limit safe:** the usage endpoint is per-account rate-limited, so cbar
-  paces fetches — each 60 s poll refreshes every account that's stale (>30 s),
-  with per-account exponential backoff honoring `Retry-After` on 429.
-- **Never breaks your login:** switching backs up the current account and rolls
-  back on any error.
+These describe how carefully cbar handles your credentials. They say nothing
+about whether using it is permitted — see the Disclaimer.
+
+- **Rate-limit safe:** the usage endpoint's budget is client-wide, not
+  per-account, so each 60 s poll fetches exactly **one** account — the stalest
+  one. Round-robin falls out of that: whatever was just read is the freshest, so
+  the next poll moves on. The active account cuts the line only once its reading
+  ages past 180 s, since auto-switch depends on it. Backoff is per-account and
+  honors `Retry-After` on 429, but it's the safety net, not the pacing.
+- **Switching tries hard not to break your login:** it snapshots the current
+  credentials and config first and restores them if any step fails. It is not a
+  transaction, though — the Keychain write lands before the config write, so a
+  crash between the two, or a rollback that itself fails, can leave the two
+  disagreeing. Recovery is `/login` in Claude Code, then *Add current account*.
 - **Never burns a refresh token:** a refresh *rotates* the token — the old one
   dies instantly — so cbar refuses to refresh any token Claude Code also holds
   (whoever went second would get `invalid_grant` and the account would need a
   manual re-login). A rotated token that can't be persisted is reported, never
   swallowed.
 - **Leak-free:** Keychain access via `/usr/bin/security` (no CoreFoundation),
-  URLSession over a released semaphore, ARC throughout.
+  URLSession over a released semaphore, ARC throughout. Tokens are passed on
+  stdin, never in `argv`, and never reach the log.
+- **One mutation at a time:** polls, clicks, and auto-switch share a serial
+  queue, so a token refresh can't interleave with an account switch.
+- **Owner-only files:** `~/.cbar` is `0700` and its contents `0600`. No tokens
+  live there (those are Keychain-only), but emails, org names, account UUIDs and
+  usage history do.
 
 ## Verify
 
@@ -105,6 +149,11 @@ swift run CbarSelfTest            # offline: keychain, creds, config splice, oau
 swift run CbarSelfTest --service  # exercises the paced UsageService against your store
 swift run CbarSelfTest --live     # live OAuth fetch for the active account + Codex
 ```
+
+"Offline" means no network, not no side effects: the default run creates and
+deletes throwaway items in your login Keychain (services `cbar-selftest*`) and
+temp dirs. It never touches your real Claude Code login. `--service` and
+`--live` read your actual store and do hit the network.
 
 ## Icon colors
 
@@ -118,8 +167,13 @@ active account's data older than 10 min.
 launchctl unload ~/Library/LaunchAgents/com.heymo.cbar.plist
 rm ~/Library/LaunchAgents/com.heymo.cbar.plist
 rm -rf ~/Applications/Cbar.app
-# accounts live in ~/.cbar + Keychain service "cbar"; remove those to fully reset
+rm -rf ~/.cbar                                    # metadata, usage cache, log
+security delete-generic-password -s cbar          # once per stored account
 ```
+
+Uninstalling does **not** put your Claude Code login back: whichever account cbar
+selected last stays active. Switch to the one you want *before* uninstalling, or
+run `/login` in Claude Code afterwards.
 
 ## Sharing with others
 

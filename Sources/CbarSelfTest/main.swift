@@ -1,41 +1,12 @@
 import Foundation
 import CbarCore
 
-// One-shot: LIVE end-to-end auto-switch diagnosis against the real store/login.
-if CommandLine.arguments.contains("--autoswitch-test") {
-    func cfgActive() -> String {
-        (try? ClaudeConfig.readAccount())?.flatMap { $0 }?.emailAddress ?? "?"
-    }
-    let store = AccountStore(); let sw = Switcher(store: store); let svc = UsageService()
-    let original = store.activeNumber()
-    print("START: config active=\(cfgActive()) store#=\(store.activeNumber().map(String.init) ?? "nil")")
-
-    // 1) switch active -> #2 (teamacct, the maxed one)
-    do { try sw.switchTo(2); print("[1] switchTo(#2) OK") }
-    catch { print("[1] switchTo(#2) FAILED: \(error)") }
-    print("    config active now=\(cfgActive()) store#=\(store.activeNumber().map(String.init) ?? "nil")")
-
-    // 2) build accounts (cache-based meters returned even if refetch 429s)
-    let accts = (try? svc.accounts()) ?? []
-    let act = accts.first(where: { $0.isActive })
-    print("[2] active acct=#\(act?.number ?? -1) \(act?.email ?? "?") maxPct=\(Int(act?.maxPct ?? 0))%")
-
-    // 3) evaluate + perform auto-switch
-    let cfg = CbarConfig.load()
-    print("[3] config: enabled=\(cfg.autoSwitchEnabled) threshold=\(Int(cfg.autoSwitchThreshold))")
-    if let target = autoSwitchTarget(accounts: accts, threshold: cfg.autoSwitchThreshold) {
-        print("    autoSwitchTarget=#\(target) → rotating")
-        do { try sw.switchTo(target); print("    rotated to #\(target) OK") }
-        catch { print("    ROTATE FAILED: \(error)") }
-    } else {
-        print("    autoSwitchTarget=nil (would NOT rotate)")
-    }
-    print("    config active after rotate=\(cfgActive())")
-
-    // 4) restore original active
-    if let original { try? sw.switchTo(original); print("[4] restored active to #\(original) (\(cfgActive()))") }
-    exit(0)
-}
+// `--autoswitch-test` used to live here: it switched the real login to a
+// hardcoded slot #2 ("teamacct, the maxed one" — an artifact of the author's
+// machine), rotated, then best-effort restored. Harmless to run here, and a
+// live-credential mutation for anyone else who found it in a public repo. The
+// pure decision logic it exercised is covered by the `autoSwitchTarget` asserts
+// below; the switching itself needs a fake store, not the user's account.
 
 // One-shot: exercise the native UsageService against the real store.
 if CommandLine.arguments.contains("--service") {
@@ -217,6 +188,29 @@ assert(store.list().isEmpty && cAfter == nil, "removed")
 try? Keychain.delete(service: storeSvc, account: "account-\(n1)")
 try? FileManager.default.removeItem(atPath: storeDir)
 print("STORE OK")
+
+// Everything under ~/.cbar must be owner-only. These files name every account
+// and copy Claude Code's oauthAccount verbatim; the mode used to be whatever
+// the user's umask gave (0644 in practice).
+let secDir = NSTemporaryDirectory() + "cbar-sec-\(getpid())/nested"
+let secFile = secDir + "/f.json"
+func mode(_ p: String) -> Int? {
+    (try? FileManager.default.attributesOfItem(atPath: p))?[.posixPermissions] as? Int
+}
+try SecureFile.write(Data("{}".utf8), to: secFile)
+assert(mode(secFile) == 0o600, "file owner-only, got \(mode(secFile).map { String($0, radix: 8) } ?? "nil")")
+assert(mode(secDir) == 0o700, "dir owner-only, got \(mode(secDir).map { String($0, radix: 8) } ?? "nil")")
+// A rewrite must not hand the mode back: .atomic renames a fresh temp file over
+// the target, so the chmod has to run on every write, not just the first.
+try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: secFile)
+try SecureFile.write(Data("{\"x\":1}".utf8), to: secFile)
+assert(mode(secFile) == 0o600, "rewrite re-tightens")
+// Directories left 0755 by earlier versions get tightened in place.
+try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: secDir)
+try SecureFile.ensureDir(secDir)
+assert(mode(secDir) == 0o700, "existing loose dir tightened")
+try? FileManager.default.removeItem(atPath: NSTemporaryDirectory() + "cbar-sec-\(getpid())")
+print("SECUREFILE OK")
 
 // Pacing: backoff caps + fetch plan
 assert(backoff(failures: 1, retryAfter: nil) == 30, "backoff n1")
