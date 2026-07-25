@@ -7,7 +7,10 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    # macos-15, not macos-14: the 14 image ships Swift 5.10 and Package.swift
+    # needs tools 6.0. The macOS 14 deployment target is set in Package.swift and
+    # is independent of which OS builds it.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Build
