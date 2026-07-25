@@ -29,11 +29,22 @@ public struct PaceRow: Sendable {
 /// Active first, then stalest.
 /// ponytail: full pass is fine for a handful of accounts; if someone ever runs
 /// dozens, cap the non-active count here and rotate.
+/// `credsChanged` lists slots whose credentials no longer match what the last
+/// failure was recorded against — a `/login` outside cbar. Backoff exists to stop
+/// hammering an endpoint that keeps refusing; a new credential means the refusal
+/// no longer applies, and waiting it out is self-defeating. Slot #2 proved it:
+/// 125 accumulated failures pinned backoff at the 600 s cap, so after a re-login
+/// the fetch was skipped, the skip meant the dead slot copy was never healed from
+/// the live keychain, and the un-healed copy produced the next failure — the
+/// ACTIVE account showed no usage at all, indefinitely.
 public func fetchPlan(now: Double, active: Int?, rows: [PaceRow],
-                      serveTTL: Double = 30, claimTTL: Double = 10) -> [Int] {
+                      serveTTL: Double = 30, claimTTL: Double = 10,
+                      credsChanged: Set<Int> = []) -> [Int] {
     func eligible(_ r: PaceRow) -> Bool {
         if let f = r.fetchedAt, now - f < serveTTL { return false }        // fresh
-        if let b = r.backoffUntil, now < b { return false }                // backing off
+        // claimTTL still applies below: ignoring backoff must not become a
+        // per-poll retry storm if the new credential also fails.
+        if !credsChanged.contains(r.number), let b = r.backoffUntil, now < b { return false }
         if let a = r.lastAttemptAt, now - a < claimTTL { return false }     // just claimed
         return true
     }

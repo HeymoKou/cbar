@@ -61,6 +61,12 @@ if CommandLine.arguments.contains("--import-cswap") {
     exit(0)
 }
 
+// Everything past here is the offline assert suite: it drives real code paths
+// against throwaway stores, so keep its side effects out of the one log the
+// README points you at for diagnosing real switches. The one-shot modes above
+// run against the REAL store and must keep logging.
+setenv("CBAR_LOG_SILENT", "1", 1)
+
 // health rules + aggregation (Accounts built directly; no cswap)
 assert(healthLevel(pct: 100, status: "ok") == .crit)
 assert(healthLevel(pct: 70, status: "ok") == .warn)
@@ -144,6 +150,15 @@ let prof = ProfileMapper.account(from: Data(profJson.utf8))
 assert(prof?.emailAddress == "p@x.com" && prof?.accountUuid == "AU1", "profile account fields")
 assert(prof?.organizationUuid == "OU1" && prof?.organizationName == "POrg", "profile org fields")
 assert(ProfileMapper.account(from: Data("{}".utf8)) == nil, "empty profile -> nil, never a guessed identity")
+// The live endpoint stopped returning email_address (2026-07-25). uuid is the
+// identity; requiring email made every profile call fail, so liveOwner was
+// permanently nil and slot copies drifted until usage went unreadable.
+let noEmail = #"{"account":{"uuid":"AU1"},"organization":{"uuid":"OU1","name":"POrg"}}"#
+let profNE = ProfileMapper.account(from: Data(noEmail.utf8))
+assert(profNE?.accountUuid == "AU1" && profNE?.emailAddress == nil, "missing email must NOT fail the mapping")
+assert(matchSlot([sa(1, "a@x.com", "AU1", "OU1")], live: profNE) == 1, "uuid alone still matches a slot")
+assert(ProfileMapper.account(from: Data(#"{"account":{"email_address":"p@x.com"}}"#.utf8)) == nil,
+       "no uuid -> nil (email alone is not an identity)")
 print("PROFILE MAP OK")
 
 // ClaudeConfig splice preserves all other keys
@@ -224,6 +239,15 @@ assert(plan.first == 2, "active first")
 assert(plan.contains(3) && plan.contains(5), "full pass: all stale fetched")
 assert(!plan.contains(1) && !plan.contains(4), "skip fresh + backoff")
 assert(plan.count == 3, "active + all eligible (not capped at 1)")
+// A re-login must break out of backoff. Slot #2 accumulated 125 failures, so
+// backoff sat at its 600 s cap; the skip meant the dead slot copy was never
+// healed from the live keychain, and the un-healed copy caused the next failure.
+let backedOff = [PaceRow(number: 7, fetchedAt: t0 - 900, backoffUntil: t0 + 500, lastAttemptAt: t0 - 600)]
+assert(fetchPlan(now: t0, active: 7, rows: backedOff).isEmpty, "backoff normally wins, even for active")
+assert(fetchPlan(now: t0, active: 7, rows: backedOff, credsChanged: [7]) == [7], "new credential overrides backoff")
+// But claimTTL must still hold, or ignoring backoff becomes a per-poll storm.
+let justTried = [PaceRow(number: 7, fetchedAt: t0 - 900, backoffUntil: t0 + 500, lastAttemptAt: t0 - 2)]
+assert(fetchPlan(now: t0, active: 7, rows: justTried, credsChanged: [7]).isEmpty, "claim window still applies")
 print("PACING OK")
 
 // Auto-switch target selection
@@ -235,12 +259,85 @@ assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10), mkAc
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 50), mkAcc(2, false, 10)], threshold: 94) == nil, "below threshold -> no switch")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 96)], threshold: 94) == nil, "no better account -> no switch")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10, provider: "codex")], threshold: 94) == nil, "codex not a switch target")
-// cswap alignment: Fable/scoped excluded — 5h/7d low → no trigger even if Fable maxed
-let fableActive = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
-                          meters: [Meter(id: "5h", pct: 10, countdown: nil), Meter(id: "7d", pct: 20, countdown: nil), Meter(id: "Fbl", pct: 99, countdown: nil)],
-                          ageSeconds: 1, provider: "claude")
-assert(switchPct(fableActive) == 20, "switchPct ignores Fable")
-assert(autoSwitchTarget(accounts: [fableActive, mkAcc(2, false, 5)], threshold: 94) == nil, "Fable 99% must not trigger (5h/7d low)")
+// Only the 5h window triggers. Fable and 7d are both excluded: the real
+// 2026-07-25 state was 5h=3% / 7d=91%, which wanted to rotate every poll off an
+// account with a nearly empty 5-hour window.
+let busy7d = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
+                     meters: [Meter(id: "5h", pct: 3, countdown: nil), Meter(id: "7d", pct: 91, countdown: nil), Meter(id: "Fbl", pct: 99, countdown: nil)],
+                     ageSeconds: 1, provider: "claude")
+assert(switchPct(busy7d) == 3, "switchPct is 5h only (ignores 7d and Fable)")
+assert(autoSwitchTarget(accounts: [busy7d, mkAcc(2, false, 5)], threshold: 93) == nil, "7d 91% / Fable 99% must not trigger when 5h is low")
+assert(switchPct(mkAcc(1, true, 93)) == 93 && autoSwitchTarget(accounts: [mkAcc(1, true, 93), mkAcc(2, false, 5)], threshold: 93) == 2, "5h at threshold triggers")
+
+// Dead accounts must never be switch targets, however good their stale cache
+// looks (slot #2: needs-reauth, 11-day-old 60%, picked 4× on 2026-07-25).
+func deadAcc(_ n: Int, _ pct: Double, status: String = "ok", age: Double? = 1, meters: [Meter]? = nil) -> Account {
+    Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: false, status: status,
+            meters: meters ?? [Meter(id: "5h", pct: pct, countdown: nil)], ageSeconds: age, provider: "claude")
+}
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 10, status: "needs-reauth")], threshold: 93) == nil, "needs-reauth is not a switch target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 10, status: "no credentials")], threshold: 93) == nil, "no-credentials is not a switch target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 10, age: 982_740)], threshold: 93) == nil, "11-day-stale cache is not a switch target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 0, meters: [])], threshold: 93) == nil, "no meters is not a switch target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 10, status: "needs-reauth"), deadAcc(3, 40)], threshold: 93) == 3, "picks the healthy one, not the emptier dead one")
+
+// status(): only fresh, real data is "ok" — slot #3 reported ok + 0% with no
+// keychain item and kept the icon green for 17 h (2026-07-25).
+let m5 = [Meter(id: "5h", pct: 3, countdown: nil)]
+func st(_ meters: [Meter], _ fetchedAt: Double?, _ err: String?, reauth: Bool = false) -> String {
+    UsageService.status(needsReauth: reauth, meters: meters, fetchedAt: fetchedAt, lastError: err, now: 1000)
+}
+assert(st([], nil, nil) == "no data", "never fetched -> no data")
+assert(st([], nil, "no credentials") == "no credentials", "missing creds must not read ok")
+assert(st(m5, 20, "rate limited") == "rate limited", "stale reading surfaces its error")
+assert(st(m5, 990, "rate limited") == "ok", "fresh reading survives a transient error")
+assert(st(m5, 990, nil, reauth: true) == "needs-reauth", "reauth wins over freshness")
+assert(st(m5, 400, "rate limited") == "ok", "at the 600s freshness boundary a backing-off row is still ok")
+assert(st(m5, 399, "rate limited") == "rate limited", "one second past it surfaces the error")
+
+// 7d is a hard ceiling, not a ranking input.
+func acc7d(_ n: Int, _ active: Bool, fiveH: Double, sevenD: Double) -> Account {
+    Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: "ok",
+            meters: [Meter(id: "5h", pct: fiveH, countdown: nil), Meter(id: "7d", pct: sevenD, countdown: nil)],
+            ageSeconds: 1, provider: "claude")
+}
+assert(!isExhausted(acc7d(1, false, fiveH: 0, sevenD: 98)), "98% is not exhausted")
+assert(isExhausted(acc7d(1, false, fiveH: 0, sevenD: 99)), "99% is the ceiling")
+// Empty 5h looks like max headroom via switchPct, so the ceiling must veto it.
+assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 95, sevenD: 10), acc7d(2, false, fiveH: 2, sevenD: 100)],
+                        threshold: 93) == nil, "weekly-exhausted account is not a target")
+assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 95, sevenD: 10), acc7d(2, false, fiveH: 2, sevenD: 100), acc7d(3, false, fiveH: 40, sevenD: 50)],
+                        threshold: 93) == 3, "skips the exhausted 2% for the healthy 40%")
+// Exhausted ACTIVE must escape even though its own 5h reads low — the old
+// "more headroom than active" test made that a one-way trap.
+assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 10, sevenD: 100), acc7d(2, false, fiveH: 40, sevenD: 50)],
+                        threshold: 93) == 2, "exhausted active switches away even to a HIGHER 5h")
+assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 10, sevenD: 100), acc7d(2, false, fiveH: 40, sevenD: 99)],
+                        threshold: 93) == nil, "but not into another exhausted account")
+// A missing 5h meter reads as 0% — unknown headroom must not rank best.
+let no5h = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
+                   meters: [Meter(id: "7d", pct: 10, countdown: nil)], ageSeconds: 1, provider: "claude")
+assert(switchPct(no5h) == 0 && !isSwitchTarget(no5h), "no 5h meter -> not a target despite reading 0%")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), no5h], threshold: 93) == nil, "unknown 5h is not headroom")
+// Staleness boundary (aligned with status freshness so 429 storms don't disable switching).
+assert(isSwitchTarget(deadAcc(2, 10, age: 600)), "fresh enough at the boundary")
+assert(!isSwitchTarget(deadAcc(2, 10, age: 601)), "one second past it is not a target")
+
+// Refresh-token rotation guard. CC holding the same token, owning the slot,
+// pointing at it, or an unknowable identity all mean: do not rotate.
+func skip(_ n: Int, active: Int?, liveOwner: Int?, cc: Bool, slotRT: String?, liveRT: String?) -> Bool {
+    UsageService.shouldSkipRefresh(n: n, active: active, liveOwner: liveOwner,
+                                  ccRunning: cc, slotRefresh: slotRT, liveRefresh: liveRT)
+}
+assert(!skip(2, active: 1, liveOwner: 1, cc: false, slotRT: "r0", liveRT: "r0"), "CC not running -> refresh freely")
+assert(skip(1, active: 1, liveOwner: 1, cc: true, slotRT: "r1", liveRT: "r1"), "verified live owner -> skip")
+assert(skip(2, active: 2, liveOwner: 1, cc: true, slotRT: "rX", liveRT: "r1"), "slot the live login points at -> skip")
+assert(skip(2, active: 1, liveOwner: 1, cc: true, slotRT: "r1", liveRT: "r1"), "token equals the live one -> skip")
+// The case the guard exists for: profile API down, so the slot copy may hold a
+// token CC already rotated away from — reusing it can revoke the whole family.
+assert(skip(2, active: 1, liveOwner: nil, cc: true, slotRT: "r0", liveRT: "r1"), "drifted copy, identity unknown -> skip")
+assert(skip(2, active: 1, liveOwner: nil, cc: true, slotRT: "r0", liveRT: nil), "live keychain unreadable -> skip")
+assert(!skip(3, active: 1, liveOwner: 1, cc: true, slotRT: "r9", liveRT: "r1"), "unrelated slot, identity known -> refresh")
 print("AUTOSWITCH OK")
 
 // Live-login reconciliation: /login in Claude Code must move cbar's active

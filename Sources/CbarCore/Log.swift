@@ -7,7 +7,13 @@ public enum CbarLog {
     static var path: String { "\(NSHomeDirectory())/.cbar/cbar.log" }
     private static let cap = 262_144   // 256 KB; reset past this
 
+    /// The self-test drives real code paths against throwaway stores, which wrote
+    /// phantom lines like "active resynced #1 → #2 (live login b@x.com)" into the
+    /// one log the README tells you to trust when diagnosing switches.
+    static var silenced: Bool { ProcessInfo.processInfo.environment["CBAR_LOG_SILENT"] != nil }
+
     public static func write(_ msg: String) {
+        if silenced { return }
         let f = ISO8601DateFormatter()
         let line = "\(f.string(from: Date())) \(msg)\n"
         let dir = (path as NSString).deletingLastPathComponent

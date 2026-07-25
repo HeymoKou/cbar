@@ -59,7 +59,7 @@ final class UsageStore {
         // so it's visible in Console why auto-switch does or doesn't fire.
         if let active = accounts.first(where: { $0.isActive && $0.provider == "claude" }) {
             let err = active.meters.isEmpty ? " (no usage data — stale/rate-limited/expired token)" : ""
-            CbarLog.write("auto-switch check active #\(active.number) \(active.email) 5h/7d=\(Int(switchPct(active)))% thr=\(Int(cfg.autoSwitchThreshold))%\(err)")
+            CbarLog.write("auto-switch check active #\(active.number) \(active.email) 5h=\(Int(switchPct(active)))% thr=\(Int(cfg.autoSwitchThreshold))% 7d=\(Int(sevenDayPct(active)))%/\(Int(sevenDayCeiling))%\(err)")
         }
         guard let target = autoSwitchTarget(accounts: accounts, threshold: cfg.autoSwitchThreshold) else { return }
         if let last = lastAutoSwitchAt, Date().timeIntervalSince(last) < autoSwitchCooldown {
@@ -92,8 +92,10 @@ final class UsageStore {
     }
 
     func switchToBest() {
-        let candidates = accounts.filter { $0.provider == "claude" && $0.switchable && !$0.isActive && !$0.meters.isEmpty }
-        guard let best = candidates.min(by: { $0.maxPct < $1.maxPct }) else { return }
+        // Same viability gate as auto-switch — "best" must not mean "the dead one
+        // whose 11-day-old cache looks empty" (2026-07-25).
+        let candidates = accounts.filter { $0.provider == "claude" && !$0.isActive && isSwitchTarget($0) }
+        guard let best = candidates.min(by: { switchPct($0) < switchPct($1) }) else { return }
         switchTo(best)
     }
 

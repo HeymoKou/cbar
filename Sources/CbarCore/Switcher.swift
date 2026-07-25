@@ -15,10 +15,19 @@ public struct Switcher {
         // /login writes keychain and .claude.json non-atomically, and trusting
         // their coherence backed one account's creds into another's slot on
         // 2026-07-10. Profile unavailable → skip the backup (it's best-effort).
-        if let curCreds = (try? Credentials.readActive()) ?? nil,
-           let ident = try? OAuthClient().fetchProfile(accessToken: curCreds.accessToken),
-           let real = matchSlot(store.list(), live: ident) {
-            try? store.setCreds(real, curCreds)
+        // Best-effort, but say so when it doesn't happen: an auto-switch during a
+        // 429 storm (when it's most likely to fire) can't reach the profile API, so
+        // the backup is skipped and the outgoing slot keeps a stale, already-rotated
+        // token — that account then needs a manual /login and nothing said why.
+        if let curCreds = (try? Credentials.readActive()) ?? nil {
+            if let ident = try? OAuthClient().fetchProfile(accessToken: curCreds.accessToken),
+               let real = matchSlot(store.list(), live: ident) {
+                do { try store.setCreds(real, curCreds) } catch {
+                    CbarLog.write("switch #\(number): backing up outgoing creds into slot #\(real) FAILED: \(error)")
+                }
+            } else {
+                CbarLog.write("switch #\(number): outgoing creds NOT backed up (identity unverifiable) — that slot may need re-login")
+            }
         }
 
         guard let targetCreds = try store.creds(number) else { throw SwitchErr.noCredentials(number) }

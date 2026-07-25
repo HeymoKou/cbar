@@ -49,6 +49,32 @@ public final class UsageService: Provider {
         (n == liveOwner ? live : nil) ?? slot
     }
 
+    /// Whether refreshing slot `n`'s expired token must be skipped and the cache
+    /// served instead. Extracted so the guard is assertable — it used to be inline
+    /// in `accounts()`, which is why the case it was written for went untested.
+    ///
+    /// A refresh ROTATES: the old token dies the instant the new one is issued, and
+    /// reuse detection can revoke the whole family. So cbar must never refresh a
+    /// token Claude Code might also be using. Four ways that can be true:
+    ///  - this slot is the profile-verified owner of the live item, CC running;
+    ///  - this slot is where the live login points (`active`), CC running — cheap
+    ///    belt for a `.claude.json` / keychain identity disagreement;
+    ///  - the token literally equals the live one;
+    ///  - identity is unknowable: CC running but the profile API is down or the
+    ///    live keychain unreadable, so `liveOwner` is nil. Then any slot copy may
+    ///    hold the token CC is about to rotate, OR one CC already rotated away
+    ///    from (reusing THAT is what revokes the family). Guessing here is what
+    ///    killed an account; wait until identity is knowable again.
+    public static func shouldSkipRefresh(n: Int, active: Int?, liveOwner: Int?,
+                                         ccRunning: Bool, slotRefresh: String?,
+                                         liveRefresh: String?) -> Bool {
+        guard ccRunning else { return false }
+        if n == liveOwner { return true }
+        if n == active { return true }
+        if let s = slotRefresh, s == liveRefresh { return true }
+        return liveOwner == nil
+    }
+
     public func accounts() throws -> [Account] {
         let now = Date().timeIntervalSince1970
         let list = store.list()
@@ -70,36 +96,87 @@ public final class UsageService: Provider {
             (try? oauth.fetchProfile(accessToken: c.accessToken)).flatMap { matchSlot(list, live: $0) }
         }
 
-        for n in fetchPlan(now: now, active: active, rows: rows) {
+        // A re-login gave the owning slot a credential its recorded failures were
+        // never about, so its backoff must not outlive them (see `fetchPlan`).
+        var credsChanged: Set<Int> = []
+        if let owner = liveOwner, let live = liveCreds,
+           live.accessToken != ((try? store.creds(owner)) ?? nil)?.accessToken {
+            credsChanged.insert(owner)
+        }
+
+        for n in fetchPlan(now: now, active: active, rows: rows, credsChanged: credsChanged) {
             var row = cache[n] ?? Row()
             row.lastAttemptAt = now                      // claim
             let slotCreds = (try? store.creds(n)) ?? nil
             guard var creds = Self.fetchCreds(n: n, liveOwner: liveOwner, live: liveCreds, slot: slotCreds) else {
-                row.lastError = "no credentials"; cache[n] = row; continue
+                // Drop the meters too: without credentials there is nothing behind
+                // the numbers, and keeping them let a dead slot pose as a switch
+                // target (slot #3 had no keychain item at all, 2026-07-25).
+                row.meters = []; row.lastError = "no credentials"; cache[n] = row; continue
             }
             // Heal the slot backup whenever the live token has moved on —
             // only into the profile-verified owner slot.
             if n == liveOwner, creds.accessToken != slotCreds?.accessToken {
                 try? store.setCreds(n, creds)
-                CbarLog.write("slot #\(n) creds healed from live keychain (profile-verified)")
+                // Reset the failure history with it: the count belongs to the OLD
+                // credential. Slot #2 carried 125 failures across a re-login, which
+                // put backoff straight back at its 600 s cap on the first hiccup —
+                // and `needsReauth` kept the account red and unswitchable until a
+                // fetch actually landed.
+                row.failures = 0; row.backoffUntil = nil
+                row.needsReauth = false; row.lastError = nil
+                CbarLog.write("slot #\(n) creds healed from live keychain (profile-verified), failure history cleared")
             }
             if isExpired(expiresAt: creds.expiresAt) {
-                if n == liveOwner && ccRunning {
-                    // Claude Code is using this token — serve cache, don't rotate it.
+                if Self.shouldSkipRefresh(n: n, active: active, liveOwner: liveOwner,
+                                          ccRunning: ccRunning, slotRefresh: creds.refreshToken,
+                                          liveRefresh: liveCreds?.refreshToken) {
+                    // Claude Code may be using this token — don't rotate it, and don't
+                    // spend a request on it either. Fetching with a knowingly-expired
+                    // access token returns 401, which the handler below reads (rightly,
+                    // for a revoked token) as needs-reauth — wiping the meters and
+                    // reddening a perfectly healthy account. Serve the cache; the live
+                    // keychain gets a fresh token as soon as CC needs one.
+                    row.lastError = "token expired (Claude Code owns it)"
+                    cache[n] = row; continue
                 } else {
                     do {
                         let r = try oauth.refresh(refreshToken: creds.refreshToken)
                         creds.accessToken = r.access; creds.expiresAt = r.expiresAt
                         if let rt = r.refresh { creds.refreshToken = rt }
                         if let sc = r.scopes { creds.scopes = sc }
-                        try? store.setCreds(n, creds)
-                        // Rotation invalidates the old refresh token — the live
-                        // keychain must get the new one or CC's next refresh 401s.
-                        // Only for the verified owner of the live item.
-                        if n == liveOwner { try? Credentials.writeActive(creds) }
+                        // Persist BEFORE using it, and never swallow the failure: the
+                        // rotation already killed the old refresh token, so a lost
+                        // write is a permanently dead account (`try?` here rotted
+                        // slot #2 for 11 days, 2026-07-25).
+                        //
+                        // The LIVE keychain goes FIRST when this slot owns it: that
+                        // item is what Claude Code authenticates with, so stranding it
+                        // on the now-dead old token breaks the user's editor, not just
+                        // cbar's reading. Bailing out before this write (as the first
+                        // cut of this fix did) is worse than the `try?` it replaced.
+                        var liveWritten = false
+                        if n == liveOwner {
+                            do { try Credentials.writeActive(creds); liveWritten = true } catch {
+                                CbarLog.write("live keychain FAILED to take rotated creds for #\(n): \(error)")
+                            }
+                        }
+                        var slotWritten = false
+                        do { try store.setCreds(n, creds); slotWritten = true } catch {
+                            CbarLog.write("slot #\(n) FAILED to persist rotated creds: \(error)")
+                        }
+                        // One surviving copy is enough for the live owner — the slot is
+                        // re-healed from the live keychain on the next poll. Any other
+                        // slot has only its own copy, so its loss is terminal.
+                        guard slotWritten || liveWritten else {
+                            CbarLog.write("slot #\(n) rotated token LOST (no store took it) — needs re-login")
+                            row.needsReauth = true; row.meters = []
+                            row.lastError = "creds write failed"; cache[n] = row; continue
+                        }
                         row.needsReauth = false
                     } catch OAuthError.needsReauth {
-                        row.needsReauth = true; row.lastError = "needs re-login"; cache[n] = row; continue
+                        row.needsReauth = true; row.meters = []
+                        row.lastError = "needs re-login"; cache[n] = row; continue
                     } catch {
                         row.failures += 1
                         row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
@@ -111,6 +188,21 @@ public final class UsageService: Provider {
                 let data = try oauth.fetchUsageRaw(accessToken: creds.accessToken)
                 row.meters = try UsageMapper.meters(from: data)
                 row.fetchedAt = now; row.failures = 0; row.backoffUntil = nil; row.lastError = nil
+                // An authenticated fetch just succeeded, so whatever needed a
+                // re-login doesn't any more. Without this the flag is sticky: a
+                // user who fixes a dead slot with `/login` + Add current account
+                // stays "needs-reauth" (red, and barred from switching) until cbar
+                // happens to perform a refresh of its own.
+                row.needsReauth = false
+            } catch OAuthError.http(401, _), OAuthError.http(403, _) {
+                // Not transient: an expired token was already refreshed above, so a
+                // 401/403 here means the credential was revoked. Demote instead of
+                // serving the last-good meters as live — they stayed selectable as a
+                // switch target for the whole freshness window.
+                row.needsReauth = true; row.meters = []
+                row.failures += 1
+                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
+                row.lastError = "unauthorized"
             } catch OAuthError.http(429, let ra) {
                 row.failures += 1
                 row.backoffUntil = now + backoff(failures: row.failures, retryAfter: ra)
@@ -129,11 +221,31 @@ public final class UsageService: Provider {
             return Account(id: "claude:\(a.number)", number: a.number, email: a.email,
                            org: a.organizationName ?? "",
                            isActive: a.number == active,
-                           status: (row?.needsReauth ?? false) ? "needs-reauth" : "ok",
+                           status: Self.status(needsReauth: row?.needsReauth ?? false,
+                                               meters: row?.meters ?? [], fetchedAt: row?.fetchedAt,
+                                               lastError: row?.lastError, now: now),
                            meters: row?.meters ?? [],
                            ageSeconds: row?.fetchedAt.map { now - $0 },
                            provider: "claude")
         }
+    }
+
+    /// UI- and switch-facing status. Only fresh, real data earns "ok": the old
+    /// mapping returned "ok" for anything short of `needsReauth`, so slot #3 —
+    /// with no keychain item at all — reported ok + 0% and kept the menu-bar icon
+    /// GREEN for 17 h while it was the active account (2026-07-25). A transient
+    /// failure on the newest attempt does not demote a still-fresh reading.
+    /// `freshFor` matches the 600 s icon-dim threshold on purpose. At 300 s a
+    /// harmless 429 flipped status to non-"ok", and `healthLevel` turns every
+    /// non-"ok" into `.crit` — so a rate-limited account showed solid red while
+    /// still looking bright and current. Switch eligibility keeps its own tighter
+    /// 300 s window (`isSwitchTarget`); these two thresholds answer different
+    /// questions: "may I act on this number" vs "is this number a lie".
+    public static func status(needsReauth: Bool, meters: [Meter], fetchedAt: Double?,
+                              lastError: String?, now: Double, freshFor: Double = 600) -> String {
+        if needsReauth { return "needs-reauth" }
+        if let f = fetchedAt, now - f <= freshFor, !meters.isEmpty { return "ok" }
+        return lastError ?? "no data"
     }
 
     public func switchTo(_ account: Account) throws {}   // handled by Switcher

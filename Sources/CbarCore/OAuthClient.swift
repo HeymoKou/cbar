@@ -109,16 +109,26 @@ public struct OAuthClient {
     }
 }
 
-/// Maps the profile API response to identity fields. Nil on anything missing —
-/// a guessed identity is worse than none.
+/// Maps the profile API response to identity fields. Nil on a missing identity —
+/// a guessed one is worse than none.
+///
+/// `account.uuid` is the required field, NOT the email: as of 2026-07-25 the
+/// endpoint stopped returning `email_address` (it comes back absent), and
+/// requiring it made every profile call throw `badResponse`. That silently took
+/// `liveOwner` to nil forever, which is load-bearing for four things — live creds
+/// are used for the owning slot, slot copies get healed from the live keychain,
+/// the refresh guard knows whose token is whose, and Switcher backs up the
+/// outgoing login. With it nil, slot copies drift until they expire and usage
+/// goes unreadable. `matchSlot` prefers uuid anyway; email is only its fallback
+/// for slots captured before uuids were stored, so it stays optional here.
 public enum ProfileMapper {
     public static func account(from data: Data) -> ClaudeConfig.OAuthAccount? {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let acc = o["account"] as? [String: Any],
-              let email = acc["email_address"] as? String,
               let uuid = acc["uuid"] as? String else { return nil }
         let org = o["organization"] as? [String: Any]
-        return ClaudeConfig.OAuthAccount(emailAddress: email, accountUuid: uuid,
+        return ClaudeConfig.OAuthAccount(emailAddress: acc["email_address"] as? String,
+                                         accountUuid: uuid,
                                          organizationUuid: org?["uuid"] as? String,
                                          organizationName: org?["name"] as? String)
     }

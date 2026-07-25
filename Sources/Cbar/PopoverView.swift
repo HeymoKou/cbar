@@ -181,7 +181,13 @@ struct AccountCard: View {
                         .background(Capsule().fill(activeGreen.opacity(0.16)))
                         .foregroundStyle(activeGreen)
                 } else if acc.switchable {
-                    Button("Switch", action: switchAction).buttonStyle(HoverButtonStyle(compact: true))
+                    // No Switch button for a slot cbar can't safely switch into —
+                    // clicking it wrote a dead token straight into the live keychain,
+                    // bypassing the auto-switch gate entirely. Remove (✕) stays
+                    // available: getting rid of a dead slot is the point.
+                    if isSwitchTarget(acc) {
+                        Button("Switch", action: switchAction).buttonStyle(HoverButtonStyle(compact: true))
+                    }
                     if let removeAction {
                         Button(action: removeAction) { Image(systemName: "xmark") }
                             .buttonStyle(HoverButtonStyle(compact: true))
@@ -194,7 +200,10 @@ struct AccountCard: View {
                          color: Metric.color(for: m.id))
             }
             if acc.meters.isEmpty {
-                Text(acc.status == "needs-reauth" ? "Re-login needed (run Claude Code login)" : "no data yet")
+                // Show the real reason, not "no data yet": slot #3 sat with no
+                // keychain item for 17 h and the UI never said so (2026-07-25).
+                Text(acc.status == "needs-reauth" ? "Re-login needed (run Claude Code login)"
+                     : acc.status == "ok" ? "no data yet" : acc.status)
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
