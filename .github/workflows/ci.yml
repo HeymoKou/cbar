@@ -12,7 +12,7 @@ jobs:
     # is independent of which OS builds it.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build
         run: swift build
       # The self-test creates and deletes throwaway login-Keychain items, which
