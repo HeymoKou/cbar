@@ -209,6 +209,14 @@ assert(mode(secFile) == 0o600, "rewrite re-tightens")
 try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: secDir)
 try SecureFile.ensureDir(secDir)
 assert(mode(secDir) == 0o700, "existing loose dir tightened")
+// The startup sweep is what upgraders actually depend on: a file nothing
+// rewrites (accounts.json between account changes, a rotated log) would keep
+// its old 0644 forever without it.
+let stale = secDir + "/stale.json"
+FileManager.default.createFile(atPath: stale, contents: Data("{}".utf8),
+                               attributes: [.posixPermissions: 0o644])
+SecureFile.tightenAll(dir: secDir)
+assert(mode(stale) == 0o600, "startup sweep tightens files nothing rewrites")
 try? FileManager.default.removeItem(atPath: NSTemporaryDirectory() + "cbar-sec-\(getpid())")
 print("SECUREFILE OK")
 

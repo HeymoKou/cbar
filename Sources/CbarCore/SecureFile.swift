@@ -39,4 +39,17 @@ public enum SecureFile {
     public static func tighten(_ path: String) {
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
     }
+
+    /// One-shot sweep at startup. Files written by an earlier version keep their
+    /// 0644 until something rewrites them, and `accounts.json` is only rewritten
+    /// when accounts change — so an upgrader could sit at the old mode forever,
+    /// which is the exact population this is for. Rotated logs (`cbar.log.1`)
+    /// have the same problem and hold the same content.
+    public static func tightenAll(dir: String) {
+        try? ensureDir(dir)
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
+            tighten("\(dir)/\(name)")
+        }
+    }
 }

@@ -56,6 +56,7 @@ final class UsageStore {
     var canImportCswap: Bool { store.list().isEmpty && CswapImport.available() }
 
     func start() {
+        SecureFile.tightenAll(dir: "\(NSHomeDirectory())/.cbar")
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
