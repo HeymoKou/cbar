@@ -254,9 +254,30 @@ public final class UsageService: Provider {
     public func switchTo(_ account: Account) throws {}   // handled by Switcher
     public func switchToBest() throws {}
 
+    /// Is Claude Code running? Gates the refresh guard above, so a FALSE NEGATIVE
+    /// is the expensive direction: it lets cbar rotate a token Claude Code still
+    /// holds, which is the `invalid_grant`/family-revocation case the whole guard
+    /// exists for.
+    ///
+    /// `pgrep -x claude` alone only sees a native install. An npm install runs as
+    /// `node` with the CLI path in its arguments, so the name never matches and
+    /// the guard silently stops guarding — invisible on a machine with the native
+    /// build, account-killing on someone else's. Match the argument path too.
+    ///
+    /// Still not authoritative: a future packaging could match neither pattern.
+    /// That residual case is covered by `shouldSkipRefresh`'s other three tests
+    /// (profile-verified owner, active pointer, identical refresh token).
     static func claudeCodeRunning() -> Bool {
+        // Narrow on purpose. A broad `-f claude` would match any shell sitting in
+        // a path containing "claude" — including this project's own checkout —
+        // and a permanent false positive means no slot ever refreshes, which is
+        // how tokens expire into unreadable usage.
+        pgrepMatches(["-x", "claude"]) || pgrepMatches(["-f", "@anthropic-ai/claude-code"])
+    }
+
+    private static func pgrepMatches(_ args: [String]) -> Bool {
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-x", "claude"]
+        p.arguments = args
         p.standardOutput = Pipe(); p.standardError = Pipe()
         do { try p.run(); p.waitUntilExit() } catch { return false }
         return p.terminationStatus == 0
