@@ -7,6 +7,10 @@ final class UsageStore {
     private(set) var accounts: [Account] = []
     private(set) var lastError: String?
     private(set) var lastUpdated: Date?
+    /// Last config the poll read. Published so the header can show the armed
+    /// threshold and the plots can draw it — no extra file read, this is the
+    /// value `maybeAutoSwitch` already loads on every pass.
+    private(set) var config = CbarConfig()
 
     var onUpdate: (() -> Void)?
 
@@ -131,6 +135,7 @@ final class UsageStore {
     /// better account exists (cooldown-guarded). Native replacement for `cswap auto`.
     private func maybeAutoSwitch() {
         let cfg = CbarConfig.load()
+        config = cfg          // publish before the guard: the header shows it either way
         guard cfg.autoSwitchEnabled else { return }
         // Observability: log the active account's switch-usage + decision each poll,
         // so it's visible in Console why auto-switch does or doesn't fire.
@@ -188,6 +193,17 @@ final class UsageStore {
     var cacheAgeText: String {
         let ages = accounts.filter { $0.provider == "claude" }.compactMap(\.ageSeconds)
         guard let age = ages.max() else { return "—" }
+        if age >= 3600 { return "cached \(Int(age / 3600))h ago" }
+        if age >= 90 { return "cached \(Int(age / 60))m ago" }
         return "cached \(Int(age))s ago"
+    }
+
+    /// Just the duration, for the header's "data 14m old". The active account's
+    /// age, not the list's worst — the header speaks for the account in use.
+    var cacheAgeShort: String {
+        guard let age = accounts.first(where: { $0.isActive && $0.provider == "claude" })?.ageSeconds
+        else { return "—" }
+        if age >= 3600 { return "\(Int(age / 3600))h" }
+        return "\(Int(age / 60))m"
     }
 }

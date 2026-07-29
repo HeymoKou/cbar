@@ -10,6 +10,9 @@ public struct CbarConfig {
     public var autoSwitchEnabled: Bool = false
     public var autoSwitchThreshold: Double = 93   // switch when active account's 5h hits this %
 
+    /// Defaults, for holding a value before the first poll has read the file.
+    public init() {}
+
     public static func load(dir: String = "\(NSHomeDirectory())/.cbar") -> CbarConfig {
         var c = CbarConfig()
         guard let d = try? Data(contentsOf: URL(fileURLWithPath: "\(dir)/config.json")),
