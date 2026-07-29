@@ -4,7 +4,8 @@ Native macOS menu-bar monitor for your Claude accounts' usage — 5h / 7d / Fabl
 per account, one-click **and automatic** switching, and a color-coded icon. **Fully self-contained
 Swift**: it talks to Claude's OAuth usage API directly and manages account
 credentials in the macOS Keychain. No cswap, no Python, no runtime dependencies.
-Codex usage is also shown (read from local Codex session files).
+Codex usage is also shown, read from local Codex session files — a session
+already running stays live, but a brand-new one can take a few minutes to appear.
 
 > **macOS only.** cbar is a native AppKit/SwiftUI menu-bar app that talks to the
 > macOS Keychain (`/usr/bin/security`) and reads Claude Code's local config
@@ -123,6 +124,8 @@ about whether using it is permitted — see the Disclaimer.
   the next poll moves on. The active account cuts the line only once its reading
   ages past 180 s, since auto-switch depends on it. Backoff is per-account and
   honors `Retry-After` on 429, but it's the safety net, not the pacing.
+  Polling stops entirely while the display is asleep and refreshes on wake, so
+  expect gaps in the log rather than an unbroken 60 s cadence.
 - **Switching tries hard not to break your login:** it snapshots the current
   credentials and config first and restores them if any step fails. It is not a
   transaction, though — the Keychain write lands before the config write, so a
@@ -145,7 +148,7 @@ about whether using it is permitted — see the Disclaimer.
 ## Verify
 
 ```bash
-swift run CbarSelfTest            # offline: keychain, creds, config splice, oauth mapping, pacing
+swift run CbarSelfTest            # offline assert suite (no network)
 swift run CbarSelfTest --service  # exercises the paced UsageService against your store
 swift run CbarSelfTest --live     # live OAuth fetch for the active account + Codex
 ```
