@@ -167,6 +167,12 @@ let oa = after["oauthAccount"] as! [String: Any]
 assert((oa["emailAddress"] as? String) == "new@y.com" && (oa["organizationUuid"] as? String) == "O2", "spliced")
 let reread = try! ClaudeConfig.readAccount(at: tmp)!
 assert(reread.emailAddress == "new@y.com" && reread.accountUuid == "U2")
+// Identical byte count, different identity: `readAccount` caches its parse, and
+// keying that cache on size alone would serve the previous account here — which
+// on a real switch means cbar reconciling against the login it just replaced.
+try! ClaudeConfig.spliceAccount(.init(emailAddress: "new@z.com", accountUuid: "U3", organizationUuid: "O3", organizationName: "Org"), at: tmp)
+let sameSize = try! ClaudeConfig.readAccount(at: tmp)!
+assert(sameSize.emailAddress == "new@z.com" && sameSize.accountUuid == "U3", "equal-size rewrite must invalidate the read cache")
 // full oauthAccount splice preserves other top-level keys + replaces all oauth fields
 try! ClaudeConfig.spliceRawAccount(["accountUuid": "U9", "emailAddress": "z@z.com", "billingType": "pro", "seatTier": "x"], at: tmp)
 let after2 = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: tmp))) as! [String: Any]

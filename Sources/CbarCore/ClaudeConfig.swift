@@ -28,16 +28,40 @@ public enum ClaudeConfig {
         try s.write(toFile: file ?? path, atomically: true, encoding: .utf8)
     }
 
+    /// Last `readAccount` result, keyed on the file identity it was parsed from.
+    /// Reached only from cbar's serial mutation queue, so no lock.
+    private static var accountCache: (path: String, mtime: Date, size: Int, account: OAuthAccount?)?
+
+    /// `.claude.json` is Claude Code's own state file — 320 KB on the machine
+    /// this was measured on, and it grows with project history — but it only
+    /// changes on `/login` or a switch. Parsing all of it once a minute to read
+    /// four identity fields was pure waste, so the result is cached on
+    /// (mtime, size): any writer's change invalidates it, cbar's own splice
+    /// included. A miss re-parses, so a stale cache is not representable.
     public static func readAccount(at file: String? = nil) throws -> OAuthAccount? {
         let f = file ?? path
-        guard let d = try? Data(contentsOf: URL(fileURLWithPath: f)),
-              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let oa = obj["oauthAccount"] as? [String: Any] else { return nil }
-        return OAuthAccount(
-            emailAddress: oa["emailAddress"] as? String,
-            accountUuid: oa["accountUuid"] as? String,
-            organizationUuid: oa["organizationUuid"] as? String,
-            organizationName: oa["organizationName"] as? String)
+        let attrs = try? FileManager.default.attributesOfItem(atPath: f)
+        let stamp = (attrs?[.modificationDate] as? Date).flatMap { m in
+            (attrs?[.size] as? NSNumber).map { (mtime: m, size: $0.intValue) }
+        }
+        if let c = accountCache, let s = stamp, c.path == f, c.mtime == s.mtime, c.size == s.size {
+            return c.account
+        }
+        let parsed: OAuthAccount? = {
+            guard let d = try? Data(contentsOf: URL(fileURLWithPath: f)),
+                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let oa = obj["oauthAccount"] as? [String: Any] else { return nil }
+            return OAuthAccount(
+                emailAddress: oa["emailAddress"] as? String,
+                accountUuid: oa["accountUuid"] as? String,
+                organizationUuid: oa["organizationUuid"] as? String,
+                organizationName: oa["organizationName"] as? String)
+        }()
+        // Cache the miss too: a config with no `oauthAccount` is a real state
+        // (logged out), and re-parsing 320 KB to rediscover it every pass is the
+        // same waste as re-parsing a hit.
+        if let s = stamp { accountCache = (f, s.mtime, s.size, parsed) }
+        return parsed
     }
 
     /// The FULL `oauthAccount` object (all ~20 fields), for verbatim capture/splice.
