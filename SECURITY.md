@@ -31,7 +31,10 @@ No token value is ever written outside the Keychain.
   for Keychain access once afterwards, and the item becomes readable by any
   process running as you via the `security` CLI without a prompt. This is the
   same trade every `security`-based account switcher makes; it is not a bug, but
-  it is a real change to your local threat model.
+  it is a real change to your local threat model. A `security` invocation that
+  sits unanswered — a locked keychain, or that access prompt on a machine nobody
+  is at — is killed after 30 s, so an unattended prompt fails the read with a
+  logged error instead of stalling every credential path behind it.
 - **cbar refuses to refresh a token Claude Code might also hold.** A refresh
   rotates: the old token dies immediately and reuse detection can revoke the
   whole family. When ownership of the live token cannot be established, cbar
