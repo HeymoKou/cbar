@@ -31,3 +31,20 @@ if [ "$local_version" = "$remote_version" ]; then
     echo "          Intentional exception: git push --no-verify" >&2
     exit 1
 fi
+
+# Every build is a release, so the tag exists before the push rather than after,
+# and points at what is being pushed. `push.followTags` then carries it along with
+# the branch, which is why it has to be annotated.
+tag="v$local_version"
+if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    echo "pre-push: VERSION says $local_version but there is no $tag tag." >&2
+    echo "          git tag -a $tag -m '$tag'" >&2
+    exit 1
+fi
+tagged="$(git rev-parse "$tag^{commit}")"
+head="$(git rev-parse HEAD)"
+if [ "$tagged" != "$head" ]; then
+    echo "pre-push: $tag points at $(git rev-parse --short "$tagged"), but HEAD is $(git rev-parse --short "$head")." >&2
+    echo "          Amending after tagging does this. Re-tag:  git tag -f -a $tag -m '$tag'" >&2
+    exit 1
+fi
