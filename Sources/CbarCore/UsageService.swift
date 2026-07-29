@@ -290,7 +290,18 @@ public final class UsageService: Provider {
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         p.arguments = args
         p.standardOutput = Pipe(); p.standardError = Pipe()
-        do { try p.run(); p.waitUntilExit() } catch { return false }
+        do { try p.run() } catch { return false }
+        let killer = p.killAfter(5)
+        p.waitUntilExit()
+        killer.cancel()
+        if p.wasKilled {
+            // A killed pgrep knows nothing, and "not running" is the answer that
+            // lets cbar rotate a token Claude Code may still be holding — the
+            // false negative this whole check exists to avoid. Assume running:
+            // the cost is a deferred refresh, not a revoked token family.
+            CbarLog.write("pgrep \(args.joined(separator: " ")) timed out — assuming Claude Code IS running")
+            return true
+        }
         return p.terminationStatus == 0
     }
 }

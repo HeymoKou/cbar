@@ -96,6 +96,27 @@ assert(cxPct(cxCached) == 77, "a cached file that vanished forces a walk")
 try? FileManager.default.removeItem(atPath: cxDir)
 print("CODEX WALK CACHE OK")
 
+// A child that outlives its deadline gets killed; one that exits first does not.
+let hung = Process()
+hung.executableURL = URL(fileURLWithPath: "/bin/sleep")
+hung.arguments = ["30"]
+try! hung.run()
+let hungStart = Date()
+let hungKiller = hung.killAfter(0.3)
+hung.waitUntilExit()
+hungKiller.cancel()
+assert(hung.wasKilled, "a child past its deadline must be killed")
+assert(Date().timeIntervalSince(hungStart) < 5, "the kill must actually unblock the wait")
+let quick = Process()
+quick.executableURL = URL(fileURLWithPath: "/bin/echo")
+quick.standardOutput = Pipe()
+try! quick.run()
+let quickKiller = quick.killAfter(30)
+quick.waitUntilExit()
+quickKiller.cancel()
+assert(!quick.wasKilled && quick.terminationStatus == 0, "a child that exits first is left alone")
+print("PROCESS TIMEOUT OK")
+
 // Keychain round-trip on a throwaway service
 let ks = "cbar-selftest", ka = "rt"
 try? Keychain.delete(service: ks, account: ka)

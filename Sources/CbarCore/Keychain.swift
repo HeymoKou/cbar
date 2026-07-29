@@ -72,9 +72,30 @@ public enum Keychain {
             i.fileHandleForWriting.write(Data(s.utf8))
             i.fileHandleForWriting.closeFile()
         }
+        // Armed before the reads, not around the wait: `security` blocks in
+        // `readDataToEndOfFile`, because a process holding up a dialog neither
+        // writes nor closes its pipes.
+        //
+        // 30 s, not 5: the dialog is answerable, and a human typing a keychain
+        // password should get to finish. What this rules out is the unattended
+        // case, where the prompt sits on a locked machine and takes the serial
+        // mutation queue — and with it the whole app — down with it.
+        //
+        // ponytail: the real fix is SecItemCopyMatching, which prompts through
+        // the framework rather than a child process and cannot wedge a queue at
+        // all. Bigger than this file; SECURITY.md already documents the
+        // `security`-based item ACL as a known property.
+        let deadline: TimeInterval = 30
+        let killer = p.killAfter(deadline)
         let out = String(data: o.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let err = String(data: e.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         p.waitUntilExit()
+        killer.cancel()
+        if p.wasKilled {
+            let msg = "timed out after \(Int(deadline))s — unanswered keychain prompt?"
+            CbarLog.write("security \(args.first ?? "?") \(msg)")
+            return (-3, "", msg)
+        }
         return (p.terminationStatus, out, err)
     }
 }
