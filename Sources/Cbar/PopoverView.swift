@@ -85,9 +85,18 @@ struct PopoverView: View {
     /// Fixed, and read by `FadingRule` to place its ramps in absolute points.
     static let panelWidth: CGFloat = 372
 
-    /// Account list scrolls only past this; below it the list is its exact
-    /// height (no slack). ~4 sections fit before scrolling kicks in.
-    private let listCap: CGFloat = 470
+    /// Header + footer + the two rules, measured off the rendered panel. Only used
+    /// to work out how much of the screen is left for the list.
+    private let chrome: CGFloat = 142
+
+    /// The list scrolls only when it would otherwise run off the bottom of the
+    /// screen — the panel hangs from the menu bar, so the screen is the real
+    /// limit. A fixed 470pt cap scrolled at four accounts on a display with room
+    /// for ten, which put the last card behind a scroll gesture for no reason.
+    private var listCap: CGFloat {
+        let usable = (NSScreen.main?.visibleFrame.height ?? 800) - chrome - 32
+        return max(240, usable)
+    }
     @State private var listHeight: CGFloat = 0
 
     /// cswap active first, then other cswap accounts, then Codex last.
@@ -149,8 +158,13 @@ struct PopoverView: View {
         let armed: Double? = store.config.autoSwitchEnabled ? store.config.autoSwitchThreshold : nil
         let isNext = acc.provider == "claude" && acc.number == nextTarget
         let canRemove = acc.provider == "claude" && !acc.isActive
+        // Claude only. Codex numbers are as old as the last Codex run and no poll
+        // can make them fresher, so "40 minutes old" is its resting state, not a
+        // fault — hatching it would cry wolf on every card, every time. Its age
+        // still shows in the card header, which is where it belongs.
+        let isStale = acc.provider == "claude" && (acc.ageSeconds ?? 0) > 600
         return AccountCard(acc: acc,
-                           stale: (acc.ageSeconds ?? 0) > 600,
+                           stale: isStale,
                            threshold: armed,
                            isNextTarget: isNext,
                            switchAction: { store.switchTo(acc) },
@@ -486,13 +500,20 @@ struct AccountCard: View {
     /// metric is about to cause a switch, why this account is the destination,
     /// how old the reading is, then the plain reset countdown.
     private func caption(for m: Meter) -> String? {
-        if stale, let a = acc.ageSeconds { return "as of \(Int(a / 60))m ago" }
         if m.id == "5h", acc.isActive, let t = threshold, m.pct >= t {
             return "over thr. \(Int(t))%"
         }
         if m.id == "5h", isNextTarget, !acc.isActive { return "most headroom" }
-        guard let c = m.countdown else { return nil }
-        return "resets \(c)"
+        // The reset countdown outranks the reading's age, including when the
+        // reading is stale. How old the number is already appears in the card
+        // header and in the hatched fill; when the window resets appears nowhere
+        // else, and it is the fact you act on. This is where 3e is not followed:
+        // Codex is ALWAYS minutes behind (its numbers are as old as the last Codex
+        // run), so spending its one caption on "as of 35m ago" left the card
+        // saying nothing but its own staleness, twice.
+        if let c = m.countdown { return "resets \(c)" }
+        if stale, let a = acc.ageSeconds { return "as of \(Int(a / 60))m ago" }
+        return nil
     }
 
     private func captionColor(for m: Meter) -> Color? {
