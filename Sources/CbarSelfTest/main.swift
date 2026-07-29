@@ -74,6 +74,28 @@ assert(cx!.meters[0].countdown == "1h 0m", "5h countdown: \(cx!.meters[0].countd
 assert(cx!.org == "OpenAI · team")
 print("CODEX OK: \(cx!.meters.map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " "))")
 
+// The sessions tree walk is memoised for `walkTTL`; the file it found is still
+// re-read every pass, and a file that disappears forces a fresh walk.
+let cxDir = NSTemporaryDirectory() + "cbar-selftest-codex-\(getpid())"
+try! FileManager.default.createDirectory(atPath: cxDir, withIntermediateDirectories: true)
+func cxWrite(_ name: String, pct: Int, mtime: Double) {
+    let line = codexLine.replacingOccurrences(of: "\"used_percent\":5.0", with: "\"used_percent\":\(pct).0")
+    try! line.write(toFile: cxDir + "/" + name, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: mtime)],
+                                           ofItemAtPath: cxDir + "/" + name)
+}
+func cxPct(_ p: CodexProvider) -> Int { Int((try! p.accounts()).first!.meters[0].pct) }
+cxWrite("a.jsonl", pct: 5, mtime: 1_000)
+let cxCached = CodexProvider(sessionsDir: cxDir)
+assert(cxPct(cxCached) == 5, "first pass reads the only session")
+cxWrite("b.jsonl", pct: 77, mtime: 2_000)
+assert(cxPct(cxCached) == 5, "a newer session inside walkTTL waits for the next walk")
+assert(cxPct(CodexProvider(sessionsDir: cxDir, walkTTL: 0)) == 77, "expired walkTTL finds the newer session")
+try! FileManager.default.removeItem(atPath: cxDir + "/a.jsonl")
+assert(cxPct(cxCached) == 77, "a cached file that vanished forces a walk")
+try? FileManager.default.removeItem(atPath: cxDir)
+print("CODEX WALK CACHE OK")
+
 // Keychain round-trip on a throwaway service
 let ks = "cbar-selftest", ka = "rt"
 try? Keychain.delete(service: ks, account: ka)

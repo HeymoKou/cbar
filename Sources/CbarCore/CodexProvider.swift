@@ -4,19 +4,47 @@ import Foundation
 /// Codex records a `token_count` event carrying `rate_limits` (primary = 5h,
 /// secondary = weekly) into `~/.codex/sessions/**/*.jsonl`. No API/token needed;
 /// data is as fresh as the last Codex run (surface the snapshot age).
-public struct CodexProvider: Provider {
+public final class CodexProvider: Provider {
     public let name = "codex"
     private let sessionsDir: String
+    private let walkTTL: TimeInterval
 
-    public init(sessionsDir: String = "\(NSHomeDirectory())/.codex/sessions") {
+    /// Which file the last tree walk picked, and when it walked. Reached only
+    /// from cbar's serial mutation queue (`UsageStore.refresh`), so no lock.
+    private var cachedNewest: (url: URL, at: Date)?
+
+    public init(sessionsDir: String = "\(NSHomeDirectory())/.codex/sessions",
+                walkTTL: TimeInterval = 300) {
         self.sessionsDir = sessionsDir
+        self.walkTTL = walkTTL
     }
 
     public func accounts() throws -> [Account] {
-        guard let url = Self.newestSession(dir: sessionsDir),
+        guard let url = newestSessionCached(now: Date()),
               let content = try? String(contentsOf: url, encoding: .utf8),
               let acc = Self.parse(content, now: Date().timeIntervalSince1970) else { return [] }
         return [acc]
+    }
+
+    /// `newestSession` stats every file in the sessions tree — 6,800 of them on
+    /// the machine this was measured on, ~29 ms warm — to answer a question that
+    /// only changes when Codex opens a NEW session. Doing that once a minute
+    /// forever is the app's single largest idle cost.
+    ///
+    /// Only the walk is cached. The file it found is re-read and re-parsed every
+    /// pass, so a session being written right now stays live at the full poll
+    /// cadence, and the snapshot age and reset countdowns keep counting. What
+    /// waits for the next walk is strictly the arrival of a brand-new session
+    /// file: up to `walkTTL` late, during which the previous session's numbers
+    /// keep showing with a visibly growing age.
+    private func newestSessionCached(now: Date) -> URL? {
+        if let c = cachedNewest, now.timeIntervalSince(c.at) < walkTTL,
+           FileManager.default.fileExists(atPath: c.url.path) {
+            return c.url
+        }
+        let found = Self.newestSession(dir: sessionsDir)
+        cachedNewest = found.map { (url: $0, at: now) }
+        return found
     }
 
     // Read-only provider: switching is a cswap-only concept.
