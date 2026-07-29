@@ -339,8 +339,9 @@ for tick in 0..<60 {
     if let n = p.first { simFetched[n] = now; picks[n, default: 0] += 1 }
 }
 assert(picks.count == 3, "every account gets served — none starves")
-// 300 s is what `isSwitchTarget` demands of a switch destination; a slot that
-// ages past it silently stops being selectable.
+// `isSwitchTarget` demands 600 s of a switch destination; a slot that ages past
+// it silently stops being selectable. Asserted at 300 s, half the real gate, so
+// this fails while there is still margin rather than at the cliff.
 assert(worstAge.values.allSatisfy { $0 <= 300 }, "no slot ages out of switch eligibility: \(worstAge)")
 assert((picks[2] ?? 0) >= (picks[1] ?? 0), "active served at least as often as an alternate")
 print("PACING OK (rotation over 60 passes: \(picks.sorted { $0.key < $1.key }.map { "#\($0.key)×\($0.value)" }.joined(separator: " ")), worst staleness \(Int(worstAge.values.max() ?? 0))s)")

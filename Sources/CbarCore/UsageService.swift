@@ -252,9 +252,9 @@ public final class UsageService: Provider {
     /// `freshFor` matches the 600 s icon-dim threshold on purpose. At 300 s a
     /// harmless 429 flipped status to non-"ok", and `healthLevel` turns every
     /// non-"ok" into `.crit` — so a rate-limited account showed solid red while
-    /// still looking bright and current. Switch eligibility keeps its own tighter
-    /// 300 s window (`isSwitchTarget`); these two thresholds answer different
-    /// questions: "may I act on this number" vs "is this number a lie".
+    /// still looking bright and current. `isSwitchTarget` deliberately uses the
+    /// same 600 s window, for its own reason (see there): a tighter gate goes
+    /// blind during a 429 storm, which is exactly when switching matters.
     public static func status(needsReauth: Bool, meters: [Meter], fetchedAt: Double?,
                               lastError: String?, now: Double, freshFor: Double = 600) -> String {
         if needsReauth { return "needs-reauth" }

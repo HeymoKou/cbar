@@ -43,10 +43,10 @@ public struct PaceRow: Sendable {
 /// `activeMaxAge` is the one exception: auto-switch reads the active account's
 /// 5 h meter to decide when to leave, so it may not lag arbitrarily. At the
 /// default 180 s with 2–3 accounts this settles into a clean uniform rotation
-/// (everyone every ~N minutes) and keeps every slot inside the 300 s window
+/// (everyone every ~N minutes) and keeps every slot inside the 600 s window
 /// `isSwitchTarget` requires of a switch destination.
 /// ponytail: that window is what breaks first as accounts are added — at ~1
-/// request/minute, 5+ accounts cannot all stay under 300 s no matter how they
+/// request/minute, 10+ accounts cannot all stay under 600 s no matter how they
 /// are ordered. Raise the poll rate or widen the window then, not this.
 ///
 /// `credsChanged` lists slots whose credentials no longer match what the last
