@@ -1,0 +1,33 @@
+#!/bin/sh
+# Refuse a branch push that leaves VERSION where the remote already has it.
+#
+# A guard, deliberately, and not a bump: a hook that edited VERSION here would be
+# writing a commit that the push has already computed past, so every version would
+# land one push late — worse than not automating it, because it would look
+# automated. This just stops the push and tells you to bump.
+#
+# Not active in a fresh clone until:  git config core.hooksPath .githooks
+set -eu
+
+# Tag-only and delete-only pushes have no version to bump.
+pushing_branch=no
+while read -r _localref _localsha remoteref _remotesha; do
+    case "$remoteref" in refs/heads/*) pushing_branch=yes ;; esac
+done
+[ "$pushing_branch" = yes ] || exit 0
+
+local_version="$(tr -d '[:space:]' < VERSION 2>/dev/null || true)"
+if [ -z "$local_version" ]; then
+    echo "pre-push: no readable VERSION file at the repo root." >&2
+    exit 1
+fi
+
+# Empty on the first push after VERSION is introduced, which correctly passes.
+remote_version="$(git show "$1/main:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+
+if [ "$local_version" = "$remote_version" ]; then
+    echo "pre-push: VERSION is still $local_version, same as $1." >&2
+    echo "          Bump the patch in ./VERSION and amend or commit it." >&2
+    echo "          Intentional exception: git push --no-verify" >&2
+    exit 1
+fi
