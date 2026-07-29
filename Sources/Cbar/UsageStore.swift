@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import CbarCore
 
@@ -14,6 +15,7 @@ final class UsageStore {
     private let switcher: Switcher
     private let codex = CodexProvider()
     private var timer: Timer?
+    private var observers: [NSObjectProtocol] = []
     private let interval: TimeInterval = 60   // pacing gates the actual network hits
     private var lastAutoSwitchAt: Date?
     private let autoSwitchCooldown: TimeInterval = 120
@@ -58,6 +60,37 @@ final class UsageStore {
     func start() {
         SecureFile.tightenAll(dir: "\(NSHomeDirectory())/.cbar")
         refresh()
+        startTimer()
+
+        // A dark display means nobody can read the icon, so every pass behind it
+        // is a network request, four process spawns and a tree walk spent on
+        // nothing. Auto-switch is off by default, so on most machines the whole
+        // pass exists only to paint a status item that isn't on screen.
+        //
+        // Screen sleep, not system sleep: the system kind stops the timer for us
+        // by stopping the machine. This is the case that runs for hours on
+        // battery with the lid open and the display off.
+        let nc = NSWorkspace.shared.notificationCenter
+        observers = [
+            nc.addObserver(forName: NSWorkspace.screensDidSleepNotification,
+                           object: nil, queue: .main) { [weak self] _ in self?.stopTimer() },
+            nc.addObserver(forName: NSWorkspace.screensDidWakeNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+                // Refresh on the way back: the cache is as stale as the sleep was
+                // long, and the user is looking at the icon right now.
+                self?.startTimer()
+                self?.refresh()
+            },
+        ]
+    }
+
+    deinit {
+        let nc = NSWorkspace.shared.notificationCenter
+        observers.forEach { nc.removeObserver($0) }
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }   // waking twice must not stack timers
         let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -67,6 +100,11 @@ final class UsageStore {
         // wakeups it was going to make anyway. Pure battery, no behaviour change.
         t.tolerance = interval * 0.1
         timer = t
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
     }
 
     /// `carrying` is a mutation's failure message, which outranks anything the
