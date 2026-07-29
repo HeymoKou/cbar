@@ -72,7 +72,20 @@ assert(Int(cx!.meters[0].pct) == 5 && cx!.meters[0].id == "5h")
 assert(Int(cx!.meters[1].pct) == 12 && cx!.meters[1].id == "7d")
 assert(cx!.meters[0].countdown == "1h 0m", "5h countdown: \(cx!.meters[0].countdown ?? "nil")")
 assert(cx!.org == "OpenAI · team")
-print("CODEX OK: \(cx!.meters.map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " "))")
+// Codex's post-2026-07-13 shape: one WEEKLY window in `primary`, `secondary`
+// null. Labelled by position this read as "5h", four times smaller than the
+// figure it claimed to be.
+let codexWeeklyOnly = #"{"timestamp":"2026-07-30T00:55:50.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":2.0,"window_minutes":10080,"resets_at":2000090000},"secondary":null,"plan_type":"team"}}}"#
+let cxWeek = CodexProvider.parse(codexWeeklyOnly, now: 2000000000)
+assert(cxWeek?.meters.count == 1, "one window in, one meter out")
+assert(cxWeek?.meters[0].id == "7d", "a 10080-minute window is 7d wherever it sits: \(cxWeek?.meters[0].id ?? "nil")")
+assert(Int(cxWeek?.meters[0].pct ?? -1) == 2)
+// Length wins over position, and a missing length falls back to position.
+assert(CodexProvider.windowLabel(300) == "5h" && CodexProvider.windowLabel(10080) == "7d")
+assert(CodexProvider.windowLabel(1440) == "1d" && CodexProvider.windowLabel(60) == "1h")
+assert(CodexProvider.windowLabel(30) == "30m", "sub-hour windows must not floor to 0h")
+assert(CodexProvider.windowLabel(Int?.none) == nil && CodexProvider.windowLabel(0) == nil)
+print("CODEX OK: \(cx!.meters.map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " ")) | weekly-only: \(cxWeek!.meters.map { "\($0.id)=\(Int($0.pct))%" }.joined(separator: " "))")
 
 // The sessions tree walk is memoised for `walkTTL`; the file it found is still
 // re-read every pass, and a file that disappears forces a fresh walk.

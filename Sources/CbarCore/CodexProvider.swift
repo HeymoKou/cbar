@@ -72,12 +72,11 @@ public final class CodexProvider: Provider {
             guard let data = line.data(using: .utf8),
                   let row = try? dec.decode(Row.self, from: data),
                   let rl = row.payload?.rate_limits else { continue }
-            var meters: [Meter] = []
-            if let p = rl.primary {
-                meters.append(Meter(id: "5h", pct: p.used_percent ?? 0, countdown: countdown(p.resets_at, now: now)))
-            }
-            if let s = rl.secondary {
-                meters.append(Meter(id: "7d", pct: s.used_percent ?? 0, countdown: countdown(s.resets_at, now: now)))
+            let meters: [Meter] = [(rl.primary, "5h"), (rl.secondary, "7d")].compactMap { w, positional in
+                guard let w else { return nil }
+                return Meter(id: Self.windowLabel(w.window_minutes) ?? positional,
+                             pct: w.used_percent ?? 0,
+                             countdown: countdown(w.resets_at, now: now))
             }
             guard !meters.isEmpty else { continue }
             let age = row.timestamp.flatMap { ageSeconds($0, now: now) }
@@ -87,6 +86,22 @@ public final class CodexProvider: Provider {
                            ageSeconds: age, provider: "codex")
         }
         return nil
+    }
+
+    /// Name a window by its length, because Codex does not name them and which
+    /// slot holds which length has already moved once: through 2026-07-12
+    /// `primary` was the 5 h window with the weekly one in `secondary`; from
+    /// 2026-07-13 there is a single weekly window in `primary` and `secondary` is
+    /// null. Labelling by position meant cbar displayed that weekly figure as
+    /// "5h" — a number four times smaller than the 5 h reading it claimed to be.
+    ///
+    /// Falls back to the positional label when the field is missing, so an older
+    /// session file still reads the way it always did.
+    public static func windowLabel(_ minutes: Int?) -> String? {
+        guard let m = minutes, m > 0 else { return nil }
+        if m % 1440 == 0 { return "\(m / 1440)d" }
+        if m >= 60 { return "\(m / 60)h" }
+        return "\(m)m"
     }
 
     /// "1h 15m" / "6d 7h" / "12m" from a reset unix timestamp.
@@ -119,5 +134,9 @@ public final class CodexProvider: Provider {
         let secondary: Window?
         let plan_type: String?
     }
-    struct Window: Decodable { let used_percent: Double?; let resets_at: Double? }
+    struct Window: Decodable {
+        let used_percent: Double?
+        let resets_at: Double?
+        let window_minutes: Int?
+    }
 }
