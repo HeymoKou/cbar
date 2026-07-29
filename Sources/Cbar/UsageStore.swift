@@ -58,9 +58,15 @@ final class UsageStore {
     func start() {
         SecureFile.tightenAll(dir: "\(NSHomeDirectory())/.cbar")
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh()
         }
+        // Nothing here is deadline-sensitive — a poll arriving 6 s late is
+        // invisible. Without a tolerance the timer demands an exact wakeup every
+        // minute for the life of the app; with one, macOS coalesces it into
+        // wakeups it was going to make anyway. Pure battery, no behaviour change.
+        t.tolerance = interval * 0.1
+        timer = t
     }
 
     /// `carrying` is a mutation's failure message, which outranks anything the
