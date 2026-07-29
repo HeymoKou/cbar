@@ -83,7 +83,18 @@ public final class UsageService: Provider {
             PaceRow(number: a.number, fetchedAt: cache[a.number]?.fetchedAt,
                     backoffUntil: cache[a.number]?.backoffUntil, lastAttemptAt: cache[a.number]?.lastAttemptAt)
         }
-        let ccRunning = Self.claudeCodeRunning()
+        // Two `pgrep` spawns, and only the expired-token branch below ever asks.
+        // Tokens last about an hour, so computing this up front paid for ~59 of
+        // every 60 passes with a fork+exec pair that nothing read. Memoised, not
+        // just deferred: several slots can expire in one pass, and the answer
+        // cannot change within a pass that already holds the mutation queue.
+        var ccRunningMemo: Bool?
+        func ccRunning() -> Bool {
+            if let v = ccRunningMemo { return v }
+            let v = Self.claudeCodeRunning()
+            ccRunningMemo = v
+            return v
+        }
 
         // Live creds are used/healed ONLY for the slot matching the token's
         // PROFILE-API identity — never attributed by pointer or .claude.json
@@ -127,7 +138,7 @@ public final class UsageService: Provider {
             }
             if isExpired(expiresAt: creds.expiresAt) {
                 if Self.shouldSkipRefresh(n: n, active: active, liveOwner: liveOwner,
-                                          ccRunning: ccRunning, slotRefresh: creds.refreshToken,
+                                          ccRunning: ccRunning(), slotRefresh: creds.refreshToken,
                                           liveRefresh: liveCreds?.refreshToken) {
                     // Claude Code may be using this token — don't rotate it, and don't
                     // spend a request on it either. Fetching with a knowingly-expired
