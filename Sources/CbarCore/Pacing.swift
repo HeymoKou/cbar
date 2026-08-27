@@ -16,9 +16,14 @@ public struct PaceRow: Sendable {
     public let fetchedAt: Double?
     public let backoffUntil: Double?
     public let lastAttemptAt: Double?
-    public init(number: Int, fetchedAt: Double?, backoffUntil: Double?, lastAttemptAt: Double?) {
+    /// Soonest absolute reset time (epoch) across this account's windows, from the
+    /// last fetch. `fetchPlan` uses it to hot-reload the instant a window rolls.
+    public let resetsAt: Double?
+    public init(number: Int, fetchedAt: Double?, backoffUntil: Double?, lastAttemptAt: Double?,
+                resetsAt: Double? = nil) {
         self.number = number; self.fetchedAt = fetchedAt
         self.backoffUntil = backoffUntil; self.lastAttemptAt = lastAttemptAt
+        self.resetsAt = resetsAt
     }
 }
 
@@ -82,6 +87,19 @@ public func fetchPlan(now: Double, active: Int?, rows: [PaceRow],
         }
     }
     if let healed = ready.first(where: { credsChanged.contains($0.number) }) { return [healed.number] }
+    // Hot-reload a window that just rolled over: once `now` passes a known reset
+    // time and no fetch has landed since, the cached utilisation is flat wrong (an
+    // idle account can sit at "99%" for the whole rotation while it's really ~0).
+    // Outranks the aged-active tier — a wrong number beats a merely old one — but
+    // not a broken-credential repair. Self-clearing: the next fetch carries a
+    // future `resetsAt`, so `now >= r` no longer holds and it won't re-trigger.
+    func rolledOver(_ r: PaceRow) -> Bool {
+        guard let reset = r.resetsAt, now >= reset else { return false }
+        return (r.fetchedAt ?? 0) < reset
+    }
+    if let hot = ready.filter(rolledOver).min(by: { ($0.resetsAt ?? 0) < ($1.resetsAt ?? 0) }) {
+        return [hot.number]
+    }
     if let active, let ar = ready.first(where: { $0.number == active }), age(ar) >= activeMaxAge {
         return [active]
     }

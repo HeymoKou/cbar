@@ -161,6 +161,27 @@ public enum UsageMapper {
         return m
     }
 
+    /// The soonest absolute reset time (epoch seconds) across every window in the
+    /// raw usage JSON, or nil if none carry one. This is the fact `fetchPlan` needs
+    /// to hot-reload an account the moment a window rolls over — `Meter.countdown`
+    /// is a relative string computed once at fetch and can't be compared to a
+    /// later `now`. Kept out of `Meter` on purpose: only the scheduler reads it.
+    public static func soonestReset(from data: Data) -> Double? {
+        guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        var soonest: Double?
+        func consider(_ iso: String?) {
+            guard let iso, let d = parseISO(iso) else { return }
+            let e = d.timeIntervalSince1970
+            if let s = soonest { soonest = min(s, e) } else { soonest = e }
+        }
+        consider((o["five_hour"] as? [String: Any])?["resets_at"] as? String)
+        consider((o["seven_day"] as? [String: Any])?["resets_at"] as? String)
+        for lim in (o["limits"] as? [[String: Any]]) ?? [] {
+            consider(lim["resets_at"] as? String)
+        }
+        return soonest
+    }
+
     static func countdown(_ iso: String?) -> String? {
         guard let iso, let d = parseISO(iso) else { return nil }
         let s = Int(d.timeIntervalSinceNow)

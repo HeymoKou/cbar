@@ -230,6 +230,13 @@ let usageReset = #"{"five_hour":{"utilization":50.0,"resets_at":"2035-01-02T03:0
 let mr = try UsageMapper.meters(from: Data(usageReset.utf8))
 assert(mr.first?.countdown != nil, "fractional resets_at must yield a countdown (not nil)")
 assert(mr.first!.countdown!.contains("d"), "far-future reset → days countdown, got \(mr.first!.countdown!)")
+// soonestReset: earliest absolute reset across windows (epoch), nil when none present
+let resetJson = #"{"five_hour":{"utilization":50.0,"resets_at":"2035-01-02T03:04:05+00:00"},"seven_day":{"utilization":20.0,"resets_at":"2035-01-01T00:00:00+00:00"}}"#
+let sr = UsageMapper.soonestReset(from: Data(resetJson.utf8))
+let earliest = ISO8601DateFormatter().date(from: "2035-01-01T00:00:00Z")!.timeIntervalSince1970
+assert(sr != nil && abs(sr! - earliest) < 1, "soonestReset returns the earliest window's reset")
+assert(UsageMapper.soonestReset(from: Data(#"{"five_hour":{"utilization":1.0,"resets_at":null}}"#.utf8)) == nil,
+       "no resets_at → nil")
 print("OAUTH MAP OK")
 
 // AccountStore on throwaway dir + keychain service
@@ -330,6 +337,31 @@ assert(fetchPlan(now: t0, active: 7, rows: backedOff, credsChanged: [7]) == [7],
 // But claimTTL must still hold, or ignoring backoff becomes a per-poll storm.
 let justTried = [PaceRow(number: 7, fetchedAt: t0 - 900, backoffUntil: t0 + 500, lastAttemptAt: t0 - 2)]
 assert(fetchPlan(now: t0, active: 7, rows: justTried, credsChanged: [7]).isEmpty, "claim window still applies")
+
+// Hot-reload on reset: a window that rolled over (now past resetsAt, no fetch
+// since) outranks a merely-staler alternate AND an aged-out active — a wrong
+// number beats an old one. Self-clearing once a fetch lands after the reset.
+let rolled = [
+    PaceRow(number: 11, fetchedAt: t0 - 500, backoffUntil: nil, lastAttemptAt: nil),                    // staler, no reset
+    PaceRow(number: 12, fetchedAt: t0 - 100, backoffUntil: nil, lastAttemptAt: nil, resetsAt: t0 - 10), // rolled 10s ago
+    PaceRow(number: 13, fetchedAt: t0 - 300, backoffUntil: nil, lastAttemptAt: nil),                    // active, aged out
+]
+assert(fetchPlan(now: t0, active: 13, rows: rolled) == [12], "rolled-over window hot-reloads first")
+// a fetch that landed after the reset (fetchedAt ≥ resetsAt) no longer fires
+let cleared = [
+    PaceRow(number: 11, fetchedAt: t0 - 500, backoffUntil: nil, lastAttemptAt: nil),
+    PaceRow(number: 12, fetchedAt: t0 - 40, backoffUntil: nil, lastAttemptAt: nil, resetsAt: t0 - 100),
+]
+assert(fetchPlan(now: t0, active: nil, rows: cleared) == [11], "fetch after reset clears hot-reload → stalest wins")
+// a reset still in the future is just a stale row, not a hot-reload
+let notYet = [
+    PaceRow(number: 11, fetchedAt: t0 - 500, backoffUntil: nil, lastAttemptAt: nil),
+    PaceRow(number: 12, fetchedAt: t0 - 100, backoffUntil: nil, lastAttemptAt: nil, resetsAt: t0 + 600),
+]
+assert(fetchPlan(now: t0, active: nil, rows: notYet) == [11], "future reset does not hot-reload → stalest wins")
+// backoff still gates a rolled-over row (don't hammer a failing endpoint)
+let rolledBackoff = [PaceRow(number: 14, fetchedAt: t0 - 100, backoffUntil: t0 + 60, lastAttemptAt: nil, resetsAt: t0 - 10)]
+assert(fetchPlan(now: t0, active: nil, rows: rolledBackoff).isEmpty, "backoff gates hot-reload too")
 
 // Starvation is a property of the SEQUENCE of passes, not of any one plan, so
 // single-pass asserts cannot see it — the shipped bug passed every assert above.

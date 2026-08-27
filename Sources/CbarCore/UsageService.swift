@@ -19,6 +19,10 @@ public final class UsageService: Provider {
     struct Row: Codable {
         var meters: [Meter] = []
         var fetchedAt: Double? = nil
+        /// Soonest absolute reset (epoch) across this row's windows — the scheduler
+        /// hot-reloads once `now` passes it. Absent on rows written before it
+        /// existed or with no reset time; then hot-reload simply doesn't fire.
+        var resetsAt: Double? = nil
         var lastAttemptAt: Double? = nil
         var backoffUntil: Double? = nil
         var failures: Int = 0
@@ -81,7 +85,8 @@ public final class UsageService: Provider {
 
         let rows = list.map { a in
             PaceRow(number: a.number, fetchedAt: cache[a.number]?.fetchedAt,
-                    backoffUntil: cache[a.number]?.backoffUntil, lastAttemptAt: cache[a.number]?.lastAttemptAt)
+                    backoffUntil: cache[a.number]?.backoffUntil, lastAttemptAt: cache[a.number]?.lastAttemptAt,
+                    resetsAt: cache[a.number]?.resetsAt)
         }
         // Two `pgrep` spawns, and only the expired-token branch below ever asks.
         // Tokens last about an hour, so computing this up front paid for ~59 of
@@ -196,6 +201,7 @@ public final class UsageService: Provider {
             do {
                 let data = try oauth.fetchUsageRaw(accessToken: creds.accessToken)
                 row.meters = try UsageMapper.meters(from: data)
+                row.resetsAt = UsageMapper.soonestReset(from: data)
                 row.fetchedAt = now; row.failures = 0; row.backoffUntil = nil; row.lastError = nil
                 // An authenticated fetch just succeeded, so whatever needed a
                 // re-login doesn't any more. Without this the flag is sticky: a
