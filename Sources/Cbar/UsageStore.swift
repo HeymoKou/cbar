@@ -156,8 +156,12 @@ final class UsageStore {
         var reason = ""
         if cfg.autoSwitchEnabled, let t = autoSwitchTarget(accounts: accounts, threshold: cfg.autoSwitchThreshold) {
             target = t; reason = "active ≥ \(Int(cfg.autoSwitchThreshold))% or exhausted"
-        } else if cfg.preWarmEnabled, UsageService.claudeCodeRunning(), let t = preWarmTarget(accounts: accounts) {
-            target = t; reason = "pre-warm 5h to 5%"
+        } else if cfg.preWarmEnabled, UsageService.claudeCodeRunning(),
+                  let active = accounts.first(where: { $0.isActive && $0.provider == "claude" })?.number,
+                  let t = preWarmMove(accounts: accounts, active: active, escapeThreshold: cfg.autoSwitchThreshold) {
+            let home = burnHome(accounts, escapeThreshold: cfg.autoSwitchThreshold)
+            reason = t == home ? "pre-warm return to burn account" : "pre-warm excursion (open idle 5h)"
+            target = t
         }
         guard let target else { return }
         if let last = lastAutoSwitchAt, Date().timeIntervalSince(last) < autoSwitchCooldown {

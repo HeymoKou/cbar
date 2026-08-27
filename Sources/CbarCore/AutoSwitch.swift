@@ -115,50 +115,63 @@ public func freshActiveReading(_ a: Account) -> Bool {
         && a.meters.contains { $0.id == "5h" } && hasSevenDay(a)
 }
 
-/// Pre-warm: the idle account to divert the live login INTO so the user's real
-/// traffic opens its 5h window and starts its reset timer. `nil` when nothing
-/// should be warmed right now.
+/// The "burn" account: the one real work should consume toward its 5h limit.
+/// Highest 5h among healthy, non-exhausted slots still BELOW the escape threshold
+/// — burning it only raises its 5h, so it stays the highest and this choice is
+/// stable (no oscillation). The instant it crosses the threshold the escape path
+/// (`autoSwitchTarget`) moves off it and the next-highest becomes home, so the
+/// two never fight. Derived, not remembered: no state to persist or resync.
+public func burnHome(_ accounts: [Account], escapeThreshold: Double = 93) -> Int? {
+    accounts.filter { $0.provider == "claude" && isSwitchTarget($0) && switchPct($0) < escapeThreshold }
+        .max(by: { a, b in
+            switchPct(a) != switchPct(b) ? switchPct(a) < switchPct(b) : a.number > b.number
+        })?.number
+}
+
+/// Pre-warm, as a scheduler around the burn account: consume ONE account (the
+/// burn home) toward its limit, and take brief excursions to open the 5h window
+/// of any COLD idle account (start its reset timer), then RETURN to the burn home.
+/// `nil` means "stay put". No inference request and no quota beyond the user's own
+/// traffic — it only re-points which account that traffic lands on.
 ///
-/// Un-warmed = a valid switch target whose 5h sits below `target` (5%), i.e. no
-/// window opened since its last reset. Among those, prefer the one with the MOST
-/// weekly headroom (lowest 7d) — the scarce resource is the 7-day limit, not the
-/// 5-hour one, so spend the cheapest weekly quota first. Skip any at/above
-/// `weeklySkip` (95%): priming a nearly-exhausted weekly account burns the last
-/// of its quota for a window it can barely use. That account is NOT stranded —
-/// the exhaustion-escape path (`autoSwitchTarget`/`switchToBest`, via
-/// `isSwitchTarget`'s 7d<99 gate) still switches into it when it is the only
-/// capacity left, so declining to PRE-WARM one never lets its quota go unused.
+/// `active` is the currently-live slot number. Returns the slot to switch to next,
+/// or nil to stay. Escape (`autoSwitchTarget`) is evaluated by the caller FIRST and
+/// outranks this — an over-threshold or exhausted account must leave regardless.
 ///
-/// While the active account is itself still warming (a warm candidate below
-/// `target`), returns nil so the caller stays put until it reaches `target`. That
-/// dwell is what produces the 5%→5%→5% round-robin: hold on each slot until its
-/// window is open, then move to the next.
-public func preWarmTarget(accounts: [Account], target: Double = 5, weeklySkip: Double = 95) -> Int? {
+/// An earlier design held on each warmed idle and kept burning IT, which stranded
+/// the real work account (cfr): pre-warm is meant to prime idles and hand the
+/// login back, not to move where you work. The return target is `burnHome`, which
+/// is derived (highest-5h healthy), so it can't oscillate the way a
+/// lowest-weekly "settle" did.
+public func preWarmMove(accounts: [Account], active: Int, target: Double = 5,
+                        weeklySkip: Double = 95, escapeThreshold: Double = 93) -> Int? {
     let claude = accounts.filter { $0.provider == "claude" }
-    guard let active = claude.first(where: { $0.isActive }) else { return nil }
-    // Decide only on a trustworthy active reading (see `freshActiveReading`). A
-    // stale / re-auth active → stay put, never advance on unknown data.
-    guard freshActiveReading(active) else { return nil }
-    // Still warming the active slot (window not open, weekly not tight) → hold
-    // until it crosses `target`. This dwell is the 5%→5%→5% round-robin: an
-    // exhausted or weekly-tight active is NOT held, so we divert off it.
-    if switchPct(active) < target, sevenDayPct(active) < weeklySkip { return nil }
-    // Un-warmed idle slots with weekly headroom; a real 7d meter is required so a
-    // missing-window 0 can't masquerade as the cheapest weekly. Lowest weekly
-    // first, tie-break lowest 5h (freshest reset), then number for a stable order.
-    let candidates = claude.filter {
-        !$0.isActive && isSwitchTarget($0) && hasSevenDay($0)
+    guard let activeAcc = claude.first(where: { $0.number == active }) else { return nil }
+    // Decide only on a trustworthy active reading. A stale / re-auth active → stay
+    // put: switching on an unknown reading abandons a half-warmed idle or churns
+    // the live login during a 429 storm. An EXHAUSTED active passes this (it's a
+    // known-good reading) and is diverted off below, not frozen.
+    guard freshActiveReading(activeAcc) else { return nil }
+    // Keep sending traffic to a low, healthy, weekly-OK active — whether it is an
+    // idle we are warming or a burn account freshly entered at low 5h, the action
+    // is identical: use it until its window is meaningfully open. An exhausted or
+    // weekly-tight active fails the 7d check and falls through to divert off it.
+    if switchPct(activeAcc) < target, sevenDayPct(activeAcc) < weeklySkip { return nil }
+    // Excursion: prime a COLD idle (window not open) — healthy, real 7d meter,
+    // weekly headroom. Cheapest weekly first (protect the scarce 7-day limit), tie
+    // freshest 5h, then number. Not `active`, so a just-warmed idle isn't re-picked.
+    if let cold = claude.filter({
+        $0.number != active && isSwitchTarget($0) && hasSevenDay($0)
             && switchPct($0) < target && sevenDayPct($0) < weeklySkip
-    }
-    return candidates.min(by: {
+    }).min(by: {
         (sevenDayPct($0), switchPct($0), Double($0.number))
             < (sevenDayPct($1), switchPct($1), Double($1.number))
-    })?.number
-    // ponytail: no "settle" step. Cheapest-first warming ends the round parked on
-    // the highest-weekly of the warmed slots, and continued traffic burns it. A
-    // return-to-lowest-weekly step was tried and REVERTED — under live usage the
-    // slots' 7d equalise and it oscillated at the cooldown floor (cfr round2).
-    // The exhaustion escape (`autoSwitchTarget`/`switchToBest`, when auto-switch
-    // is on) is the safety net for a slot that climbs toward its weekly limit;
-    // pre-warm pairs with auto-switch for exactly this reason.
+    }) {
+        return cold.number
+    }
+    // Nothing cold left to prime → hand the login back to the burn account.
+    if let home = burnHome(accounts, escapeThreshold: escapeThreshold), home != active {
+        return home
+    }
+    return nil
 }
