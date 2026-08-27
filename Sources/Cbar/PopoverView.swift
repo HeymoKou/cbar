@@ -381,7 +381,7 @@ struct AccountCard: View {
             // No rule between the header and the plots: the grid's 1pt gaps are
             // the only lines inside a card, and they run vertically. The header's
             // own bottom padding does the separating.
-            if !acc.meters.isEmpty { plots }
+            if !acc.meters.isEmpty { plots } else { statusNote }
         }
         .background(ground)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(border, lineWidth: 1))
@@ -420,7 +420,7 @@ struct AccountCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 11)
-        .padding(.bottom, acc.meters.isEmpty ? 11 : 10)
+        .padding(.bottom, acc.meters.isEmpty ? 2 : 10)
         .background(alignment: .leading) {
             // The active card's header carries a short wash of the accent, fading
             // out by 70%. Chrome, not hue on data.
@@ -430,11 +430,12 @@ struct AccountCard: View {
                                startPoint: .leading, endPoint: .trailing)
             }
         }
-        .overlay(alignment: .bottomLeading) { statusNote }
     }
 
     /// Why a card has no numbers, said in the card. "no data yet" was hiding a
-    /// slot with no keychain item at all for 17 h (2026-07-25).
+    /// slot with no keychain item at all for 17 h (2026-07-25). In the card's
+    /// vertical flow, not an overlay: an overlaid note with negative padding drew
+    /// past the card's clip bounds and got sliced off (2026-08-27).
     @ViewBuilder private var statusNote: some View {
         if acc.meters.isEmpty {
             Text(acc.status == "needs-reauth" ? "Re-login needed (run Claude Code login)"
@@ -442,8 +443,11 @@ struct AccountCard: View {
                 .font(.system(size: 10))
                 .foregroundStyle(Noct.ink5)
                 .lineLimit(2)
-                .padding(.horizontal, 27)
-                .padding(.bottom, -6)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 27)
+                .padding(.trailing, 12)
+                .padding(.bottom, 11)
         }
     }
 
