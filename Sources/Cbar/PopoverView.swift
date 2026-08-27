@@ -210,17 +210,24 @@ struct PopoverView: View {
     /// panel is about to do on its own.
     private var statusPill: some View {
         let auto = store.config.autoSwitchEnabled
+        let warm = store.config.preWarmEnabled
+        // Either mode rewrites the live login on its own, so the pill has to read
+        // as "armed" for both — pre-warm alone used to look identical to a passive
+        // monitor while it was switching accounts underneath.
+        let armed = auto || warm
         let empty = claudeAccounts.isEmpty
-        let text = auto
-            ? "AUTO ON · \(Int(store.config.autoSwitchThreshold))%"
-            : "\(claudeAccounts.count) ACCOUNT\(claudeAccounts.count == 1 ? "" : "S")"
+        let text: String
+        if auto && warm { text = "AUTO \(Int(store.config.autoSwitchThreshold))% · WARM" }
+        else if auto { text = "AUTO ON · \(Int(store.config.autoSwitchThreshold))%" }
+        else if warm { text = "PRE-WARM ON" }
+        else { text = "\(claudeAccounts.count) ACCOUNT\(claudeAccounts.count == 1 ? "" : "S")" }
         return Text(text)
             .font(.system(size: 10, weight: .medium))
             .tracking(0.6)
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .overlay(Capsule().stroke(auto ? Noct.accentLine : (empty ? Noct.hairlineSoft : Noct.hairline),
+            .overlay(Capsule().stroke(armed ? Noct.accentLine : (empty ? Noct.hairlineSoft : Noct.hairline),
                                       lineWidth: 1))
-            .foregroundStyle(auto ? Noct.accentText : (empty ? Noct.ink5 : Noct.ink4))
+            .foregroundStyle(armed ? Noct.accentText : (empty ? Noct.ink5 : Noct.ink4))
     }
 
     // MARK: body pieces
@@ -340,7 +347,10 @@ struct PopoverView: View {
         let age = store.cacheAgeText
         if age == "—" { return "—" }
         if stale { return "\(age) · numbers may be behind" }
-        if store.config.autoSwitchEnabled { return "\(age) · auto-switch cooldown 120s" }
+        let auto = store.config.autoSwitchEnabled, warm = store.config.preWarmEnabled
+        if auto && warm { return "\(age) · auto-switch + pre-warm on" }
+        if auto { return "\(age) · auto-switch cooldown 120s" }
+        if warm { return "\(age) · pre-warm on · opening idle 5h windows" }
         return "\(age) · polls every 60s"
     }
 }

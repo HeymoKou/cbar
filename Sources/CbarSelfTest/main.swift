@@ -464,6 +464,102 @@ assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), no5h], threshold: 93) == 
 assert(isSwitchTarget(deadAcc(2, 10, age: 600)), "fresh enough at the boundary")
 assert(!isSwitchTarget(deadAcc(2, 10, age: 601)), "one second past it is not a target")
 
+// Pre-warm: divert into an idle slot to open its 5h window; lowest-weekly first,
+// skip ≥95% weekly, hold while the active slot is itself still warming.
+// A active 60%/7d30, two idle: B 0%/7d85, C 0%/7d20 → warm C (cheapest weekly).
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 30),
+                                acc7d(2, false, fiveH: 0, sevenD: 85),
+                                acc7d(3, false, fiveH: 0, sevenD: 20)]) == 3, "warm the lowest-weekly idle slot")
+// Only idle slot is ≥95% weekly → don't pre-warm it (burns the last of its quota).
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 30),
+                                acc7d(2, false, fiveH: 0, sevenD: 97)]) == nil, "skip ≥95% weekly for pre-warm")
+// ...but such a slot is NOT stranded: when it is the only capacity left, the
+// exhaustion-escape path still switches into it (7d<99), so no free limit passes.
+assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 10, sevenD: 100),
+                                   acc7d(2, false, fiveH: 40, sevenD: 95)], threshold: 93) == 2,
+       "escape still uses a 95% slot when everything else is exhausted")
+// Hold: while the active slot is still warming (5h<5%, healthy), stay put.
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 2, sevenD: 20),
+                                acc7d(2, false, fiveH: 0, sevenD: 30)]) == nil, "hold on the slot being warmed")
+// Advance: once the active slot crosses 5%, move to the next un-warmed one.
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 5, sevenD: 20),
+                                acc7d(2, false, fiveH: 0, sevenD: 40)]) == 2, "advance after the active slot is warmed")
+// Tie on weekly → freshest 5h (lowest) first. The lower 5h is on the HIGHER
+// slot number on purpose, so this kills dropping 5h from the ranking (or ranking
+// by number before 5h) — both would wrongly pick #2.
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 10),
+                                acc7d(2, false, fiveH: 3, sevenD: 50),
+                                acc7d(3, false, fiveH: 0, sevenD: 50)]) == 3, "weekly tie -> lowest 5h (not lowest number)")
+// Nothing left to warm (all idle slots already ≥5%) → nil.
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 10),
+                                acc7d(2, false, fiveH: 20, sevenD: 20),
+                                acc7d(3, false, fiveH: 30, sevenD: 20)]) == nil, "all warmed -> nothing to do")
+// An exhausted idle slot is never a pre-warm target.
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 10),
+                                acc7d(2, false, fiveH: 0, sevenD: 99)]) == nil, "exhausted slot is not a warm target")
+// WEEKLY is the ranking key, not 5h: B 5h0/7d85 vs C 5h3/7d20 → C, even though B
+// has the lower 5h. (Kills a (5h,7d) ranking that the all-5h=0 cases can't catch.)
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 30),
+                                acc7d(2, false, fiveH: 0, sevenD: 85),
+                                acc7d(3, false, fiveH: 3, sevenD: 20)]) == 3, "weekly (not 5h) drives the choice")
+// A dead idle slot (needs-reauth) with the CHEAPEST weekly must still be skipped;
+// pick the healthy costlier one. (Kills dropping the candidate isSwitchTarget gate.)
+func warm7d(_ n: Int, active: Bool, fiveH: Double, sevenD: Double, status: String = "ok", age: Double = 1) -> Account {
+    Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: status,
+            meters: [Meter(id: "5h", pct: fiveH, countdown: nil), Meter(id: "7d", pct: sevenD, countdown: nil)],
+            ageSeconds: age, provider: "claude")
+}
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 30),
+                                warm7d(2, active: false, fiveH: 0, sevenD: 10, status: "needs-reauth"),
+                                acc7d(3, false, fiveH: 0, sevenD: 40)]) == 3, "dead cheap slot skipped for healthy one")
+// A stale/re-auth ACTIVE read must NOT advance pre-warm — stay put on unknown.
+// The active's 5h is 60 (NOT warming), so only the freshness guard can hold it:
+// this kills removing `guard freshActiveReading(active)` (a 5h<5 active would be
+// caught by the hold instead, hiding the regression).
+assert(preWarmTarget(accounts: [warm7d(1, active: true, fiveH: 60, sevenD: 20, status: "needs-reauth"),
+                                acc7d(2, false, fiveH: 0, sevenD: 20)]) == nil, "re-auth active -> stay put")
+assert(preWarmTarget(accounts: [warm7d(1, active: true, fiveH: 60, sevenD: 20, age: 700),
+                                acc7d(2, false, fiveH: 0, sevenD: 20)]) == nil, "stale active -> stay put")
+// An active MISSING its 5h meter is not a decidable reading → stay put. The 7d is
+// 97 so if the 5h-meter leg were dropped, the hold's 7d<95 would be false and it
+// would wrongly divert to the idle. (Kills removing the 5h-meter leg.)
+let activeNo5h = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
+                         meters: [Meter(id: "7d", pct: 97, countdown: nil)], ageSeconds: 1, provider: "claude")
+assert(preWarmTarget(accounts: [activeNo5h, acc7d(2, false, fiveH: 0, sevenD: 20)]) == nil, "active w/o 5h meter -> stay put")
+// An active MISSING its 7d meter can't be judged for weekly → stay put, not treat
+// as 7d=0%. (Kills dropping hasSevenDay from freshActiveReading.)
+let activeNo7d = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
+                         meters: [Meter(id: "5h", pct: 60, countdown: nil)], ageSeconds: 1, provider: "claude")
+assert(preWarmTarget(accounts: [activeNo7d, acc7d(2, false, fiveH: 0, sevenD: 20)]) == nil, "active w/o 7d meter -> stay put")
+// Freshness boundary: exactly 600s old still acts, 601s does not. (Kills moving
+// the <=600 boundary.)
+assert(preWarmTarget(accounts: [warm7d(1, active: true, fiveH: 60, sevenD: 20, age: 600),
+                                acc7d(2, false, fiveH: 0, sevenD: 20)]) == 2, "active at 600s boundary still acts")
+assert(preWarmTarget(accounts: [warm7d(1, active: true, fiveH: 60, sevenD: 20, age: 601),
+                                acc7d(2, false, fiveH: 0, sevenD: 20)]) == nil, "active one second past 600s -> stay put")
+// But an EXHAUSTED active is a good reading — divert off it to warm a healthy
+// idle, don't freeze. (freshActiveReading is true; the hold's 7d<95 leg is false.)
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 3, sevenD: 99),
+                                acc7d(2, false, fiveH: 0, sevenD: 20)]) == 2, "exhausted active diverts, not freezes")
+// Active warming BUT weekly-tight (7d≥95): don't hold on it, divert to a healthy
+// idle. (Kills dropping the 7d<weeklySkip leg of the hold.)
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 2, sevenD: 97),
+                                acc7d(2, false, fiveH: 0, sevenD: 20)]) == 2, "don't hold on a weekly-tight active")
+// An idle slot with NO 7d meter must not be treated as 0% weekly. (Kills dropping
+// the hasSevenDay requirement — a missing window would rank as cheapest.)
+let no7d = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
+                   meters: [Meter(id: "5h", pct: 0, countdown: nil)], ageSeconds: 1, provider: "claude")
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 30), no7d]) == nil, "missing 7d meter -> not a warm target")
+// Full tie (weekly AND 5h) → lower number, deterministically. (Kills flipping the
+// number tie-break.)
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 10),
+                                acc7d(2, false, fiveH: 0, sevenD: 50),
+                                acc7d(3, false, fiveH: 0, sevenD: 50)]) == 2, "full tie -> lowest number")
+// Nothing to warm and no settle step: park where we are, return nil (no home move
+// — the return-to-lowest-weekly step was reverted for oscillating under usage).
+assert(preWarmTarget(accounts: [acc7d(1, true, fiveH: 60, sevenD: 80),
+                                acc7d(2, false, fiveH: 20, sevenD: 20)]) == nil, "all warmed -> stay put, no settle churn")
+
 // Refresh-token rotation guard. CC holding the same token, owning the slot,
 // pointing at it, or an unknowable identity all mean: do not rotate.
 func skip(_ n: Int, active: Int?, liveOwner: Int?, cc: Bool, slotRT: String?, liveRT: String?) -> Bool {

@@ -77,6 +77,22 @@ public final class UsageService: Provider {
         return liveOwner == nil
     }
 
+    /// Reset a slot's cached failure state (backoff, failures, needs-reauth) right
+    /// after fresh credentials are captured for it (Add current account). The
+    /// cached failure was recorded against the OLD, now-replaced token, but
+    /// `credsChanged` can't detect the fix on this path: `addCurrent` copies the
+    /// live token straight into the slot, so slot == live and the diff is empty.
+    /// Without this the just-re-logged-in account stays backed-off and red for up
+    /// to the ≤600s needs-reauth backoff, contradicting the recovery flow the
+    /// status mapping promises.
+    public func clearFailureState(_ n: Int) {
+        var cache = loadCache()
+        guard var row = cache[n] else { return }
+        row.backoffUntil = nil; row.failures = 0
+        row.needsReauth = false; row.lastError = nil
+        cache[n] = row; saveCache(cache)
+    }
+
     public func accounts() throws -> [Account] {
         let now = Date().timeIntervalSince1970
         let list = store.list()
@@ -189,7 +205,16 @@ public final class UsageService: Provider {
                         }
                         row.needsReauth = false
                     } catch OAuthError.needsReauth {
+                        // Back off a dead slot like any other failure. Without this
+                        // its `fetchedAt` never advances, so it stays the STALEST row
+                        // forever and wins every `fetchPlan` pass that the active slot
+                        // doesn't preempt — starving healthy alternates of refreshes
+                        // (a needs-reauth #1 kept #2 at 20 min stale, blocking it as a
+                        // switch/pre-warm target, 2026-08-27). A real re-login clears
+                        // this via `credsChanged`, so recovery is unaffected.
                         row.needsReauth = true; row.meters = []
+                        row.failures += 1
+                        row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
                         row.lastError = "needs re-login"; cache[n] = row; continue
                     } catch {
                         row.failures += 1
@@ -284,7 +309,7 @@ public final class UsageService: Provider {
     /// Still not authoritative: a future packaging could match neither pattern.
     /// That residual case is covered by `shouldSkipRefresh`'s other three tests
     /// (profile-verified owner, active pointer, identical refresh token).
-    static func claudeCodeRunning() -> Bool {
+    public static func claudeCodeRunning() -> Bool {
         // Narrow on purpose. A broad `-f claude` would match any shell sitting in
         // a path containing "claude" — including this project's own checkout —
         // and a permanent false positive means no slot ever refreshes, which is

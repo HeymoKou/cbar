@@ -136,21 +136,37 @@ final class UsageStore {
     private func maybeAutoSwitch() {
         let cfg = CbarConfig.load()
         config = cfg          // publish before the guard: the header shows it either way
-        guard cfg.autoSwitchEnabled else { return }
+        guard cfg.autoSwitchEnabled || cfg.preWarmEnabled else { return }
         // Observability: log the active account's switch-usage + decision each poll,
         // so it's visible in Console why auto-switch does or doesn't fire.
         if let active = accounts.first(where: { $0.isActive && $0.provider == "claude" }) {
             let err = active.meters.isEmpty ? " (no usage data — stale/rate-limited/expired token)" : ""
             CbarLog.write("auto-switch check active #\(active.number) \(active.email) 5h=\(Int(switchPct(active)))% thr=\(Int(cfg.autoSwitchThreshold))% 7d=\(Int(sevenDayPct(active)))%/\(Int(sevenDayCeiling))%\(err)")
         }
-        guard let target = autoSwitchTarget(accounts: accounts, threshold: cfg.autoSwitchThreshold) else { return }
+        // The 93%/exhaustion escape outranks pre-warm: leaving a blocked account is
+        // mandatory, priming an idle one is opportunistic. Pre-warm only diverts
+        // when Claude Code is actually running — without a live session there is no
+        // traffic to open the target's window, so the switch would just park the
+        // login on an idle slot.
+        // ponytail: claudeCodeRunning() spawns pgrep on the main thread. It runs at
+        // most once per 60s poll and only when the escape didn't fire; the same
+        // pgrep already runs each pass inside accounts(). Move it off-main if the
+        // poll ever gets hot.
+        var target: Int?
+        var reason = ""
+        if cfg.autoSwitchEnabled, let t = autoSwitchTarget(accounts: accounts, threshold: cfg.autoSwitchThreshold) {
+            target = t; reason = "active ≥ \(Int(cfg.autoSwitchThreshold))% or exhausted"
+        } else if cfg.preWarmEnabled, UsageService.claudeCodeRunning(), let t = preWarmTarget(accounts: accounts) {
+            target = t; reason = "pre-warm 5h to 5%"
+        }
+        guard let target else { return }
         if let last = lastAutoSwitchAt, Date().timeIntervalSince(last) < autoSwitchCooldown {
-            CbarLog.write("auto-switch WANTED → #\(target) but in cooldown")
+            CbarLog.write("auto-switch WANTED → #\(target) (\(reason)) but in cooldown")
             return
         }
         guard let acc = accounts.first(where: { $0.number == target && $0.provider == "claude" }) else { return }
         lastAutoSwitchAt = Date()   // prevent re-entry while the async switch runs
-        CbarLog.write("auto-switch triggered → #\(target) \(acc.email) (active ≥ \(Int(cfg.autoSwitchThreshold))%)")
+        CbarLog.write("auto-switch triggered → #\(target) \(acc.email) (\(reason))")
         work.async { [weak self] in
             guard let self else { return }
             do {
@@ -167,6 +183,10 @@ final class UsageStore {
     }
 
     func switchTo(_ account: Account) {
+        // Arm the shared cooldown so the next poll's auto-switch/pre-warm doesn't
+        // reverse a hand-picked account a second later — the auto path only wrote
+        // this timestamp itself, so a manual switch used to be fair game to undo.
+        lastAutoSwitchAt = Date()
         mutate("switch to #\(account.number)") { [switcher] in try switcher.switchTo(account.number) }
     }
 
@@ -179,7 +199,13 @@ final class UsageStore {
     }
 
     func addCurrent() {
-        mutate("add current account") { [store] in _ = try store.addCurrent() }
+        // Clear the slot's stale failure state after capturing fresh creds — this
+        // IS the "fix a dead slot" path, and its backoff/needs-reauth must not
+        // outlive the re-login (credsChanged can't see it, slot == live).
+        mutate("add current account") { [store, usage] in
+            let n = try store.addCurrent()
+            usage.clearFailureState(n)
+        }
     }
 
     func remove(_ number: Int) {
