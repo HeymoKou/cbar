@@ -9,7 +9,10 @@ VERSION="$(tr -d '[:space:]' < VERSION)"
 # for free. Homebrew builds from a tarball with no .git, hence the fallback.
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 
-swift build -c release
+# Extra flags are passed through so the Homebrew formula can build the same
+# bundle this script builds: it needs --disable-sandbox, and duplicating the
+# build there is how the plist came to carry a hand-typed version.
+swift build -c release "$@"
 BIN=".build/release/Cbar"
 APP="Cbar.app"
 
