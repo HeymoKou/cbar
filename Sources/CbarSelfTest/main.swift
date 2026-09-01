@@ -617,6 +617,46 @@ assert(UsageService.fetchCreds(n: 2, liveOwner: nil, live: liveCred, slot: slotC
 assert(UsageService.fetchCreds(n: 2, liveOwner: 1, live: liveCred, slot: nil) == nil, "non-owner without slot creds -> nil, never live")
 print("FETCH CREDS OK")
 
+// ---- CbarConfig: defaults + first-run seeding -------------------------------
+// The bug this covers (2026-09-01): no config file was ever written and both
+// flags defaulted off, so cbar watched an account hit its limit and never
+// rotated. Defaults are now ON, and the file gets written so the setting is
+// visible instead of implied.
+assert(CbarConfig().autoSwitchEnabled, "auto-switch defaults ON")
+assert(CbarConfig().preWarmEnabled, "pre-warm defaults ON")
+
+let cfgDir = NSTemporaryDirectory() + "cbar-cfg-\(UUID().uuidString)"
+defer { try? FileManager.default.removeItem(atPath: cfgDir) }
+
+// Missing file reads as the (on) defaults, so an upgrade with no config still rotates.
+assert(CbarConfig.load(dir: cfgDir).autoSwitchEnabled, "no file -> defaults, auto-switch on")
+
+// Hoisted out of the assert deliberately: `assert` is compiled OUT in release,
+// so a seed call written inside one never runs there and the rest of this block
+// then fails on a file that was never written.
+let seededFirst = CbarConfig.seedIfMissing(dir: cfgDir)
+assert(seededFirst, "first run seeds the config")
+let seededPath = cfgDir + "/config.json"
+assert(FileManager.default.fileExists(atPath: seededPath), "seed wrote config.json")
+// Round-trip through load(), not just the raw JSON: seeding a file the loader
+// can't read back would be the same invisible-default failure in a new costume.
+let seeded = CbarConfig.load(dir: cfgDir)
+assert(seeded.autoSwitchEnabled && seeded.preWarmEnabled && seeded.autoSwitchThreshold == 93,
+       "seeded file round-trips to the defaults")
+// 0600: this file decides whether something rewrites the live login.
+let mode = (try! FileManager.default.attributesOfItem(atPath: seededPath)[.posixPermissions] as! NSNumber).intValue
+assert(mode == 0o600, "seeded config is owner-only, got \(String(mode, radix: 8))")
+
+// Seeding is once-only — it must never overwrite a choice the user made.
+try! Data("{\"autoSwitchEnabled\":false,\"autoSwitchThreshold\":80}".utf8).write(to: URL(fileURLWithPath: seededPath))
+let seededAgain = CbarConfig.seedIfMissing(dir: cfgDir)
+assert(!seededAgain, "seed is a no-op once the file exists")
+let edited = CbarConfig.load(dir: cfgDir)
+assert(!edited.autoSwitchEnabled, "explicit false survives seeding")
+assert(edited.autoSwitchThreshold == 80, "explicit threshold survives seeding")
+assert(edited.preWarmEnabled, "key absent from an edited file keeps the default")
+print("CONFIG DEFAULTS + SEED OK")
+
 if CommandLine.arguments.contains("--live") {
     let start = Date()
     let live = try UsageService().accounts()

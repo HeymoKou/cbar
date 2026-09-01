@@ -25,8 +25,11 @@ not endorsed by Anthropic, and not supported by Anthropic.
   [Consumer Terms](https://www.anthropic.com/legal/consumer-terms),** which
   restrict automated access and circumventing usage limits. Accounts have been
   suspended for less. That risk is yours, not the author's, and no amount of
-  careful engineering in this repo changes it. Auto-switching is off by default
-  for exactly this reason — turning it on is a decision you make knowingly.
+  careful engineering in this repo changes it. Auto-switching and pre-warm are
+  **on** by default: the first launch writes `~/.cbar/config.json` with both
+  enabled, and cbar starts rotating your live login on its own. If that is not
+  what you want, set them to `false` in that file (no restart needed) or don't
+  install cbar.
 - **It writes your live Claude Code credentials.** Switching accounts rewrites
   the `Claude Code-credentials` Keychain item and `~/.claude.json`. A bug here
   costs you a re-login, and in the worst case a revoked token family that needs
@@ -76,12 +79,17 @@ sharing the repo or the tap — a locally built `.app` needs no Apple signing.
 
 ## Auto-switch
 
-**Off by default.** cbar monitors only until you turn this on; nothing rewrites
-your login on its own until you do. See the Disclaimer above before enabling it.
-Set `autoSwitchEnabled` to `true` in `~/.cbar/config.json` (no restart needed —
-it's re-read on the next poll).
+**On by default.** The first launch writes `~/.cbar/config.json` with
+auto-switch and pre-warm enabled, and cbar rotates your live login from then on.
+See the Disclaimer above. To turn either off, set its key to `false` in that file
+— no restart needed, it's re-read on the next poll. (Deleting the file does *not*
+disable anything: the defaults are on and the next launch writes it back.)
 
-Once enabled, cbar switches away from the **active** account when either is true:
+It used to default to off, which read as safe and behaved as broken — no config
+file was ever written, so the flag was invisible and the common outcome was an
+account sitting at its limit while cbar watched.
+
+cbar switches away from the **active** account when either is true:
 
 - its **5h** usage reaches `autoSwitchThreshold`, or
 - its **7d** usage reaches **99%** — a hard ceiling, not a ranking input.
@@ -101,13 +109,35 @@ The whole config file:
 ```json
 {
   "autoSwitchEnabled": true,
-  "autoSwitchThreshold": 93
+  "autoSwitchThreshold": 93,
+  "preWarmEnabled": true
 }
 ```
 
-Defaults: **disabled**, threshold `93`. Every check and switch decision is logged
-to `~/.cbar/cbar.log` (`tail -f ~/.cbar/cbar.log` to watch why it did or didn't
-fire).
+That is exactly what the first launch writes. Every check and switch decision is
+logged to `~/.cbar/cbar.log` (`tail -f ~/.cbar/cbar.log` to watch why it did or
+didn't fire).
+
+Neither mode runs behind a **sleeping display** — cbar stops polling when the
+screen sleeps and decides again on wake.
+
+## Pre-warm
+
+Your 5h window doesn't start counting down until you use the account, so an idle
+account's window is *closed*: switching to it at 93% buys you a full 5 hours
+starting then, instead of a window that could already be half spent. Pre-warm
+opens those windows ahead of time.
+
+It costs no extra quota — it sends no requests of its own. All it does is
+re-point where your **own** traffic lands: brief excursions onto a cold idle
+account to start its reset timer, then back to the "burn" account (the healthy
+one with the highest 5h, the one you're meant to consume first). It only acts
+while Claude Code is actually running, since with no traffic a switch would just
+park your login somewhere idle.
+
+The 93% escape outranks it — leaving a blocked account is mandatory, priming an
+idle one is opportunistic. Set `preWarmEnabled` to `false` to keep only the
+escape.
 
 ## Engineering safeguards
 

@@ -63,13 +63,25 @@ final class UsageStore {
 
     func start() {
         SecureFile.tightenAll(dir: "\(NSHomeDirectory())/.cbar")
+        // First run writes the config, so what cbar is armed to do is a file the
+        // user can read — not a default they have to find in the source. Before
+        // the first refresh, so pass one already sees the real settings.
+        if CbarConfig.seedIfMissing() {
+            CbarLog.write("wrote default ~/.cbar/config.json (auto-switch on, pre-warm on)")
+        }
         refresh()
         startTimer()
 
         // A dark display means nobody can read the icon, so every pass behind it
         // is a network request, four process spawns and a tree walk spent on
-        // nothing. Auto-switch is off by default, so on most machines the whole
-        // pass exists only to paint a status item that isn't on screen.
+        // nothing.
+        //
+        // The cost: auto-switch and pre-warm are ON by default now, and neither
+        // can fire behind a sleeping display. That is the intended trade — a
+        // machine whose screen is off is a machine nobody is prompting, so there
+        // is no traffic to rotate away from. A headless long-running session is
+        // the exception; wake the display and the wake handler refreshes and
+        // decides immediately.
         //
         // Screen sleep, not system sleep: the system kind stops the timer for us
         // by stopping the machine. This is the case that runs for hours on

@@ -3,21 +3,57 @@ import Foundation
 /// Minimal config, read from `~/.cbar/config.json` (edit the file to change).
 /// Lenient: missing keys keep defaults.
 public struct CbarConfig {
-    /// OFF by default, deliberately. Auto-switch rewrites the live Claude Code
-    /// keychain item and `~/.claude.json` on its own schedule; someone who
-    /// installed what the README calls a usage monitor must not get that without
-    /// asking for it. Opting in is one line in `~/.cbar/config.json`.
-    public var autoSwitchEnabled: Bool = false
+    /// ON by default. This was off, on the reasoning that rewriting the live
+    /// keychain item and `~/.claude.json` is too much to hand someone who
+    /// installed a usage monitor. What that produced instead: no config file was
+    /// ever written, so the flag was invisible, and on 2026-09-01 an account sat
+    /// at its reset while cbar watched and did nothing — every poll returned at
+    /// the `autoSwitchEnabled || preWarmEnabled` guard before it even logged a
+    /// decision. Rotating off a blocked account IS the app; a default that
+    /// silently disables it is the wrong side to fail on. `seedIfMissing` writes
+    /// the file on first run so the setting is a visible line you can flip, not
+    /// an undocumented default.
+    public var autoSwitchEnabled: Bool = true
     public var autoSwitchThreshold: Double = 93   // switch when active account's 5h hits this %
 
-    /// OFF by default, same reasoning as auto-switch: it rewrites the live login on
-    /// its own. When on, cbar diverts the live account through idle slots to open
-    /// (pre-warm) their 5h windows with the user's real traffic. Independent of
-    /// `autoSwitchEnabled` — you can pre-warm without the 93% escape, or both.
-    public var preWarmEnabled: Bool = false
+    /// ON by default, same reasoning. When on, cbar diverts the live account
+    /// through idle slots to open (pre-warm) their 5h windows with the user's real
+    /// traffic. Independent of `autoSwitchEnabled` — you can pre-warm without the
+    /// 93% escape, or both. It also only acts while Claude Code is actually
+    /// running, so an idle machine is never churned.
+    public var preWarmEnabled: Bool = true
 
     /// Defaults, for holding a value before the first poll has read the file.
     public init() {}
+
+    /// Write the default config on first run. Two jobs: make the settings that
+    /// rewrite your login DISCOVERABLE (a file you can read and edit beats a
+    /// default nobody can see), and give "off" somewhere to be recorded.
+    ///
+    /// No-op once the file exists, so it never overwrites a choice. Deleting the
+    /// file is therefore not how you disable cbar — the defaults are on, and the
+    /// next launch re-seeds them; set the key to `false` instead.
+    ///
+    /// Startup only, NOT inside `load()`: `load()` runs every 60 s poll, and
+    /// seeding from there would rewrite the file behind a user editing it.
+    @discardableResult
+    public static func seedIfMissing(dir: String = "\(NSHomeDirectory())/.cbar") -> Bool {
+        let path = "\(dir)/config.json"
+        guard !FileManager.default.fileExists(atPath: path) else { return false }
+        let d = CbarConfig()
+        let o: [String: Any] = [
+            "autoSwitchEnabled": d.autoSwitchEnabled,
+            "autoSwitchThreshold": d.autoSwitchThreshold,
+            "preWarmEnabled": d.preWarmEnabled,
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: o,
+                                                     options: [.prettyPrinted, .sortedKeys]),
+              // 0600 like every other file cbar owns: this one decides whether
+              // something rewrites the live login, so it is not group-writable.
+              (try? SecureFile.write(json, to: path)) != nil
+        else { return false }
+        return true
+    }
 
     public static func load(dir: String = "\(NSHomeDirectory())/.cbar") -> CbarConfig {
         var c = CbarConfig()
