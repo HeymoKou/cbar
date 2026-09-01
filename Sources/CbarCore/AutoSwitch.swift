@@ -68,6 +68,33 @@ public struct CbarConfig {
     }
 }
 
+/// Whether cbar should keep polling behind a SLEEPING display.
+///
+/// Polling in the dark normally buys nothing: a network request, four process
+/// spawns and a tree walk to repaint a status icon nobody can see. But "nobody
+/// can see it" is not the same as "nothing is happening" — a Claude Code session
+/// runs perfectly well with the lid open and the screen off, and it is filling a
+/// 5h window the whole time. Freezing there is the failure this app exists to
+/// prevent: you come back to a blocked account that cbar watched fill up and
+/// declined to rotate off because the display was dark.
+///
+/// So: armed AND actually being used. Neither half alone is enough — an unarmed
+/// cbar has nothing to do with the answer, and an armed one with no session has
+/// no traffic to rotate.
+///
+/// `claudeCodeRunning` is an autoclosure because it spawns pgrep: the arming
+/// check short-circuits first, so an unarmed cbar pays nothing per dark tick.
+///
+/// This cannot help when the whole MACHINE sleeps — timers do not fire there and
+/// cbar will not take a power assertion to stop that, since keeping someone's Mac
+/// awake to watch a meter is a worse bargain than the missed switch. In practice
+/// a running session usually holds the system awake by itself.
+public func pollsWhileDark(autoSwitchEnabled: Bool, preWarmEnabled: Bool,
+                           claudeCodeRunning: @autoclosure () -> Bool) -> Bool {
+    guard autoSwitchEnabled || preWarmEnabled else { return false }
+    return claudeCodeRunning()
+}
+
 /// Usage % that drives switching — the **5h window only**.
 ///
 /// 7d used to be folded in via `max(5h, 7d)` (cswap's rule). It made cbar switch

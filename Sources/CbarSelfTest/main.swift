@@ -617,6 +617,30 @@ assert(UsageService.fetchCreds(n: 2, liveOwner: nil, live: liveCred, slot: slotC
 assert(UsageService.fetchCreds(n: 2, liveOwner: 1, live: liveCred, slot: nil) == nil, "non-owner without slot creds -> nil, never live")
 print("FETCH CREDS OK")
 
+// ---- pollsWhileDark: keep working behind a sleeping display ------------------
+// Armed AND in use. Before this, screen sleep hard-stopped the poll timer, so an
+// unattended overnight session rode its account into the wall with cbar sitting
+// next to it holding the answer.
+assert(pollsWhileDark(autoSwitchEnabled: true, preWarmEnabled: false, claudeCodeRunning: true),
+       "armed + session running -> poll in the dark")
+assert(pollsWhileDark(autoSwitchEnabled: false, preWarmEnabled: true, claudeCodeRunning: true),
+       "pre-warm alone still counts as armed")
+assert(!pollsWhileDark(autoSwitchEnabled: true, preWarmEnabled: true, claudeCodeRunning: false),
+       "no session -> nothing to rotate, stay dark")
+assert(!pollsWhileDark(autoSwitchEnabled: false, preWarmEnabled: false, claudeCodeRunning: true),
+       "unarmed -> the answer is unusable, stay dark")
+
+// The arming check must short-circuit BEFORE the running check, because the real
+// caller passes a pgrep spawn there and an unarmed cbar should pay nothing per
+// dark tick.
+var probeCalls = 0
+func runningProbe() -> Bool { probeCalls += 1; return true }
+_ = pollsWhileDark(autoSwitchEnabled: false, preWarmEnabled: false, claudeCodeRunning: runningProbe())
+assert(probeCalls == 0, "unarmed must not spawn the running check, got \(probeCalls) calls")
+_ = pollsWhileDark(autoSwitchEnabled: true, preWarmEnabled: false, claudeCodeRunning: runningProbe())
+assert(probeCalls == 1, "armed evaluates the running check exactly once, got \(probeCalls)")
+print("POLLS WHILE DARK OK")
+
 // ---- CbarConfig: defaults + first-run seeding -------------------------------
 // The bug this covers (2026-09-01): no config file was ever written and both
 // flags defaulted off, so cbar watched an account hit its limit and never

@@ -23,6 +23,9 @@ final class UsageStore {
     private let interval: TimeInterval = 60   // pacing gates the actual network hits
     private var lastAutoSwitchAt: Date?
     private let autoSwitchCooldown: TimeInterval = 120
+    /// Display asleep, not the machine. Gates the timer tick rather than stopping
+    /// it — see `pollsWhileDark`.
+    private var screensAsleep = false
 
     /// EVERY credential mutation runs here, one at a time. These paths used to
     /// take independent global-queue slots: the 60 s timer, opening the popover,
@@ -72,28 +75,34 @@ final class UsageStore {
         refresh()
         startTimer()
 
-        // A dark display means nobody can read the icon, so every pass behind it
-        // is a network request, four process spawns and a tree walk spent on
-        // nothing.
+        // A dark display means nobody can read the icon, so a pass behind it is a
+        // network request, four process spawns and a tree walk spent on nothing —
+        // UNLESS a Claude Code session is running, which is exactly when a 5h
+        // window is filling in the dark and rotating off it is the whole job.
+        // `pollsWhileDark` is that rule; the timer keeps ticking either way and
+        // the tick decides, so an idle dark machine costs one config read per
+        // minute instead of a full pass.
         //
-        // The cost: auto-switch and pre-warm are ON by default now, and neither
-        // can fire behind a sleeping display. That is the intended trade — a
-        // machine whose screen is off is a machine nobody is prompting, so there
-        // is no traffic to rotate away from. A headless long-running session is
-        // the exception; wake the display and the wake handler refreshes and
-        // decides immediately.
+        // This used to hard-stop the timer on screen sleep. Cheaper, and wrong
+        // once auto-switch became the default: it meant a long unattended session
+        // rode its account straight into the wall while cbar sat next to it with
+        // the answer.
         //
         // Screen sleep, not system sleep: the system kind stops the timer for us
-        // by stopping the machine. This is the case that runs for hours on
-        // battery with the lid open and the display off.
+        // by stopping the machine, and cbar will not hold a power assertion to
+        // prevent that. This is the case that runs for hours on battery with the
+        // lid open and the display off.
         let nc = NSWorkspace.shared.notificationCenter
         observers = [
             nc.addObserver(forName: NSWorkspace.screensDidSleepNotification,
-                           object: nil, queue: .main) { [weak self] _ in self?.stopTimer() },
+                           object: nil, queue: .main) { [weak self] _ in self?.screensAsleep = true },
             nc.addObserver(forName: NSWorkspace.screensDidWakeNotification,
                            object: nil, queue: .main) { [weak self] _ in
-                // Refresh on the way back: the cache is as stale as the sleep was
-                // long, and the user is looking at the icon right now.
+                self?.screensAsleep = false
+                // Refresh on the way back: the cache is as stale as the last dark
+                // tick that decided to skip, and the user is looking at the icon
+                // right now. `startTimer` is belt-and-braces — nothing stops the
+                // timer any more, and it no-ops if one is already running.
                 self?.startTimer()
                 self?.refresh()
             },
@@ -103,12 +112,18 @@ final class UsageStore {
     deinit {
         let nc = NSWorkspace.shared.notificationCenter
         observers.forEach { nc.removeObserver($0) }
+        // Screen sleep no longer stops the timer, so this is the only place left
+        // that does. The closure captures `self` weakly, so a surviving timer
+        // would not leak — it would just fire into nothing once a minute.
+        stopTimer()
     }
 
     private func startTimer() {
         guard timer == nil else { return }   // waking twice must not stack timers
         let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.refresh()
+            guard let self else { return }
+            guard !self.screensAsleep || self.worthPollingInTheDark() else { return }
+            self.refresh()
         }
         // Nothing here is deadline-sensitive — a poll arriving 6 s late is
         // invisible. Without a tolerance the timer demands an exact wakeup every
@@ -121,6 +136,22 @@ final class UsageStore {
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
+    }
+
+    /// Re-reads the config rather than using the published `config`: that copy is
+    /// only refreshed by a poll, and a run of skipped dark ticks is precisely when
+    /// it would go stale — arming cbar with the screen off would then never take
+    /// effect. The read is one small file; the pgrep behind it only happens when
+    /// cbar is armed.
+    ///
+    /// ponytail: this runs pgrep on the main thread, once a minute, only while the
+    /// display is asleep and cbar is armed. Same shape as the one in
+    /// `maybeAutoSwitch`; move both off-main together if the poll ever gets hot.
+    private func worthPollingInTheDark() -> Bool {
+        let cfg = CbarConfig.load()
+        return pollsWhileDark(autoSwitchEnabled: cfg.autoSwitchEnabled,
+                              preWarmEnabled: cfg.preWarmEnabled,
+                              claudeCodeRunning: UsageService.claudeCodeRunning())
     }
 
     /// `carrying` is a mutation's failure message, which outranks anything the

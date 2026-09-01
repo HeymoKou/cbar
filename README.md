@@ -118,8 +118,15 @@ That is exactly what the first launch writes. Every check and switch decision is
 logged to `~/.cbar/cbar.log` (`tail -f ~/.cbar/cbar.log` to watch why it did or
 didn't fire).
 
-Neither mode runs behind a **sleeping display** — cbar stops polling when the
-screen sleeps and decides again on wake.
+Both keep working behind a **sleeping display**, but only when there is a reason
+to: cbar polls in the dark if it's armed *and* a Claude Code session is actually
+running. An unattended overnight run is exactly when an account fills up
+unwatched, so that's the case worth the battery; a dark idle machine costs one
+config read a minute and nothing else.
+
+If the **whole machine** sleeps, nothing fires — timers don't run there, and cbar
+won't hold a power assertion to keep your Mac awake watching a meter. A running
+session usually keeps the system awake by itself.
 
 ## Pre-warm
 
