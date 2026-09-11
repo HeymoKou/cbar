@@ -64,28 +64,63 @@ public final class CodexProvider: Provider {
         return best?.url
     }
 
-    /// Parse the LAST `rate_limits` snapshot in a session's jsonl content.
+    /// Parse the latest usable snapshot for every rate-limit bucket in a
+    /// session. Codex now emits the normal allowance and model-specific limits
+    /// (for example Astra) as separate `token_count` rows. Looking at only the
+    /// final row made whichever bucket happened to be written first disappear.
     /// `now` = seconds since epoch, injected for testability.
     public static func parse(_ content: String, now: Double) -> Account? {
         let dec = JSONDecoder()
+        var seen = Set<String>()
+        var meters: [Meter] = []
+        var newestTimestamp: String?
+        var planType: String?
         for line in content.split(separator: "\n").reversed() {
             guard let data = line.data(using: .utf8),
                   let row = try? dec.decode(Row.self, from: data),
                   let rl = row.payload?.rate_limits else { continue }
-            let meters: [Meter] = [(rl.primary, "5h"), (rl.secondary, "7d")].compactMap { w, positional in
+            let bucket = rl.limit_id ?? "codex"
+            guard !seen.contains(bucket) else { continue }
+
+            let windows = [(rl.primary, "5h"), (rl.secondary, "7d")].compactMap { w, positional -> Meter? in
                 guard let w else { return nil }
-                return Meter(id: Self.windowLabel(w.window_minutes) ?? positional,
-                             pct: w.used_percent ?? 0,
+                let window = Self.windowLabel(w.window_minutes) ?? positional
+                let label = Self.meterLabel(limitID: bucket, limitName: rl.limit_name,
+                                            window: window, hasSecondary: rl.secondary != nil)
+                return Meter(id: label, pct: w.used_percent ?? 0,
                              countdown: countdown(w.resets_at, now: now))
             }
-            guard !meters.isEmpty else { continue }
-            let age = row.timestamp.flatMap { ageSeconds($0, now: now) }
-            return Account(id: "codex", number: 0, email: "Codex",
-                           org: (rl.plan_type.map { "OpenAI · \($0)" }) ?? "OpenAI",
-                           isActive: false, status: "ok", meters: meters,
-                           ageSeconds: age, provider: "codex")
+            // A terminal reason-only snapshot (for example `premium` with both
+            // windows null) must not shadow the last snapshot that measured it.
+            guard !windows.isEmpty else { continue }
+            seen.insert(bucket)
+            meters.append(contentsOf: windows)
+            if newestTimestamp == nil { newestTimestamp = row.timestamp }
+            if planType == nil { planType = rl.plan_type }
         }
-        return nil
+        guard !meters.isEmpty else { return nil }
+        // Reversed traversal discovers newest buckets first. Put the ordinary
+        // duration meters first, followed by named/model-specific allowances.
+        meters.sort { Self.meterOrder($0.id) < Self.meterOrder($1.id) }
+        let age = newestTimestamp.flatMap { ageSeconds($0, now: now) }
+        return Account(id: "codex", number: 0, email: "Codex",
+                       org: (planType.map { "OpenAI · \($0)" }) ?? "OpenAI",
+                       isActive: false, status: "ok", meters: meters,
+                       ageSeconds: age, provider: "codex")
+    }
+
+    static func meterLabel(limitID: String, limitName: String?, window: String,
+                           hasSecondary: Bool) -> String {
+        guard limitID != "codex" else { return window }
+        let raw = limitName ?? limitID.replacingOccurrences(of: "_", with: " ")
+        let name = raw.localizedCaseInsensitiveContains("astra") ? "Astra" : raw
+        return hasSecondary ? "\(name) \(window)" : name
+    }
+
+    private static func meterOrder(_ id: String) -> Int {
+        if id == "5h" { return 0 }
+        if id == "7d" { return 1 }
+        return 2
     }
 
     /// Name a window by its length, because Codex does not name them and which
@@ -130,6 +165,8 @@ public final class CodexProvider: Provider {
     }
     struct Payload: Decodable { let rate_limits: RateLimits? }
     struct RateLimits: Decodable {
+        let limit_id: String?
+        let limit_name: String?
         let primary: Window?
         let secondary: Window?
         let plan_type: String?

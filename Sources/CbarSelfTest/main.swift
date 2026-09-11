@@ -80,6 +80,15 @@ let cxWeek = CodexProvider.parse(codexWeeklyOnly, now: 2000000000)
 assert(cxWeek?.meters.count == 1, "one window in, one meter out")
 assert(cxWeek?.meters[0].id == "7d", "a 10080-minute window is 7d wherever it sits: \(cxWeek?.meters[0].id ?? "nil")")
 assert(Int(cxWeek?.meters[0].pct ?? -1) == 2)
+// Model-specific allowances are emitted as separate snapshots. Keep both the
+// latest base allowance and Astra instead of returning whichever row came last.
+let codexMultiLimit = codexLine + "\n" + #"{"timestamp":"2026-07-09T16:37:41.997Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_astra","limit_name":"GPT-6 Astra","primary":{"used_percent":34.0,"window_minutes":300,"resets_at":2000007200},"secondary":null,"plan_type":"team"}}}"#
+let cxMulti = CodexProvider.parse(codexMultiLimit, now: 2000000000)
+assert(cxMulti?.meters.map(\.id) == ["5h", "7d", "Astra"], "base + Astra meters: \(cxMulti?.meters.map(\.id) ?? [])")
+assert(Int(cxMulti?.meters.last?.pct ?? -1) == 34, "Astra usage")
+// A later empty status/reason row cannot erase the last measured bucket.
+let codexEmptyTail = codexMultiLimit + "\n" + #"{"timestamp":"2026-07-09T16:37:42.997Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_astra","limit_name":"GPT-6 Astra","primary":null,"secondary":null,"plan_type":"team"}}}"#
+assert(CodexProvider.parse(codexEmptyTail, now: 2000000000)?.meters.map(\.id) == ["5h", "7d", "Astra"])
 // Length wins over position, and a missing length falls back to position.
 assert(CodexProvider.windowLabel(300) == "5h" && CodexProvider.windowLabel(10080) == "7d")
 assert(CodexProvider.windowLabel(1440) == "1d" && CodexProvider.windowLabel(60) == "1h")
