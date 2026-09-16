@@ -112,6 +112,18 @@ the plan has one, otherwise its **weekly** one — or its week hits 99%. It move
 to the least-used account that is fresh and healthy. No pre-warm: a running
 Codex never follows the switch, so there is no traffic to open a window with.
 
+## Grok & Antigravity
+
+If you are logged into Grok Build (`~/.grok/auth.json`) or Antigravity / `agy`
+(the `gemini`/`antigravity` Keychain item), cbar shows a **read-only** card for
+the current login: usage percent and reset countdown, polled the same way as
+Claude and Codex. There is no add/switch/remove for either — they track the
+account the CLI is already using.
+
+Grok usage comes from the CLI proxy's undocumented billing endpoint. Antigravity
+usage comes from Cloud Code's quota summary (5h + weekly, per model pool). Both
+can change without notice, same disclaimer as Claude and Codex.
+
 ## Config
 
 `~/.cbar/config.json`, re-read every poll — no restart needed:

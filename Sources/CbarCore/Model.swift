@@ -4,8 +4,11 @@ public struct Meter: Identifiable, Sendable, Codable {
     public let id: String          // "5h" | "7d" | "Fbl" | other scoped name
     public let pct: Double
     public let countdown: String?
-    public init(id: String, pct: Double, countdown: String?) {
-        self.id = id; self.pct = pct; self.countdown = countdown
+    /// Absolute reset (epoch seconds). Preferred over `countdown`, which is a
+    /// string baked at fetch and goes stale between polls.
+    public let resetsAt: Double?
+    public init(id: String, pct: Double, countdown: String?, resetsAt: Double? = nil) {
+        self.id = id; self.pct = pct; self.countdown = countdown; self.resetsAt = resetsAt
     }
 }
 
@@ -18,11 +21,18 @@ public struct Account: Identifiable, Sendable {
     public let status: String      // "ok" | other
     public let meters: [Meter]
     public let ageSeconds: Double?
-    public let provider: String    // "claude" | "codex"
+    public let provider: String    // "claude" | "codex" | "grok" | "antigravity"
     public var maxPct: Double { meters.map(\.pct).max() ?? 0 }
-    /// Codex is switchable only as a stored slot (number ≥ 1). Number 0 is the
-    /// read-only card built from session files, which belongs to no account.
-    public var switchable: Bool { provider != "codex" || number > 0 }
+    /// Only Claude slots and stored Codex slots (number ≥ 1) can be switched.
+    /// Grok / Antigravity cards, and the session-file Codex card (number 0),
+    /// are the live login's current snapshot — monitor only.
+    public var switchable: Bool {
+        switch provider {
+        case "claude": return true
+        case "codex": return number > 0
+        default: return false
+        }
+    }
     public init(id: String, number: Int, email: String, org: String,
                 isActive: Bool, status: String, meters: [Meter], ageSeconds: Double?,
                 provider: String = "cswap") {
@@ -61,13 +71,13 @@ public func anyStale(_ accounts: [Account], threshold: Double = 600) -> Bool {
 /// uses this so a maxed NON-active account doesn't redden the icon — the color
 /// reflects the account you're actually using.
 public func activeHealth(_ accounts: [Account]) -> Health {
-    guard let active = accounts.first(where: { $0.isActive && $0.provider != "codex" }) else { return .healthy }
+    guard let active = accounts.first(where: { $0.isActive && $0.provider == "claude" }) else { return .healthy }
     return healthLevel(pct: active.maxPct, status: active.status)
 }
 
 /// Whether the active account's usage is stale (icon dims).
 public func activeStale(_ accounts: [Account], threshold: Double = 600) -> Bool {
-    guard let active = accounts.first(where: { $0.isActive && $0.provider != "codex" }) else { return false }
+    guard let active = accounts.first(where: { $0.isActive && $0.provider == "claude" }) else { return false }
     return (active.ageSeconds ?? 0) > threshold
 }
 

@@ -27,6 +27,9 @@ final class UsageStore {
     private let codexUsage: CodexUsageService
     private let codexSwitcher: CodexSwitcher
     private let codexInbox = CodexLoginInbox()
+    /// Live-login snapshots only: no stored slots, no switch.
+    private let grok = GrokUsageService()
+    private let antigravity = AntigravityUsageService()
     /// Separate from Claude's: the two rewrite different logins, and one
     /// provider's switch must not hold the other's escape in cooldown.
     private var lastCodexSwitchAt: Date?
@@ -188,6 +191,8 @@ final class UsageStore {
                 }
             } catch { err = err ?? "import Codex login: \(error)" }
             accs += self.codexStore.list().isEmpty ? ((try? self.codex.accounts()) ?? []) : self.codexUsage.accounts()
+            accs += self.grok.accounts()
+            accs += self.antigravity.accounts()
             DispatchQueue.main.async {
                 self.accounts = accs
                 self.lastError = err
@@ -282,6 +287,7 @@ final class UsageStore {
     }
 
     func switchTo(_ account: Account) {
+        guard account.switchable else { return }
         if account.provider == "codex" {
             lastCodexSwitchAt = Date()
             mutate("switch Codex to #\(account.number)") { [weak self, codexSwitcher] in
@@ -321,6 +327,7 @@ final class UsageStore {
     }
 
     func remove(_ account: Account) {
+        guard account.switchable else { return }
         if account.provider == "codex" {
             mutate("remove Codex #\(account.number)") { [codexStore, codexUsage] in
                 try codexStore.remove(account.number)

@@ -47,7 +47,7 @@ struct HoverButtonStyle: ButtonStyle {
 /// each end instead of stopping against the panel edge. Freestanding rules fade;
 /// card outlines and the rules between metric cells stay solid.
 private struct FadingRule: View {
-    /// 48pt of ramp an end, as a fraction of the panel's fixed 372pt width.
+    /// 48pt of ramp an end, as a fraction of the panel width.
     private let fade = 48.0 / PopoverView.panelWidth
     var body: some View {
         let line = Noct.ink.opacity(0.14)
@@ -68,7 +68,7 @@ private struct Badge: View {
     let bg: Color
     var body: some View {
         Text(text)
-            .font(.system(size: 9, weight: .bold))
+            .font(.system(size: 11, weight: .bold))
             .tracking(0.8)
             .padding(.horizontal, 7).padding(.vertical, 4)
             .background(RoundedRectangle(cornerRadius: 4).fill(bg))
@@ -92,11 +92,11 @@ struct PopoverView: View {
     var onHeight: (CGFloat) -> Void = { _ in }
 
     /// Fixed, and read by `FadingRule` to place its ramps in absolute points.
-    static let panelWidth: CGFloat = 372
+    static let panelWidth: CGFloat = 400
 
     /// Header + footer + the two rules, measured off the rendered panel. Only used
     /// to work out how much of the screen is left for the list.
-    private let chrome: CGFloat = 142
+    private let chrome: CGFloat = 118
 
     /// The list scrolls only when it would otherwise run off the bottom of the
     /// screen — the panel hangs from the menu bar, so the screen is the real
@@ -108,11 +108,17 @@ struct PopoverView: View {
     }
     @ViewState private var listHeight: CGFloat = 0
 
-    /// cswap active first, then other cswap accounts, then Codex last.
+    /// Claude active first, then other Claude accounts, then Codex, Grok,
+    /// Antigravity — monitor-only cards stay below anything switchable.
     private var sortedAccounts: [Account] {
         func rank(_ a: Account) -> Int {
-            if a.provider == "codex" { return 2 }
-            return a.isActive ? 0 : 1
+            switch a.provider {
+            case "claude": return a.isActive ? 0 : 1
+            case "codex": return 2
+            case "grok": return 3
+            case "antigravity": return 4
+            default: return 5
+            }
         }
         return store.accounts.enumerated()
             .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
@@ -137,19 +143,19 @@ struct PopoverView: View {
             header
             FadingRule()
             ScrollView {
-                VStack(spacing: 12) {
+                VStack(spacing: 4) {
                     if let error = store.lastError { errorBanner(error) }
                     if let notice = store.notice { noticeBanner(notice) }
-                    // Any stored account, not just Claude: someone tracking only
-                    // Codex accounts would otherwise never see them.
-                    if !store.accounts.contains(where: \.switchable) {
+                    // Any row, not just Claude: Grok/Antigravity snapshots and
+                    // a Codex-only store would otherwise never appear.
+                    if store.accounts.isEmpty {
                         emptyState
                     } else {
                         ForEach(sortedAccounts) { acc in card(for: acc) }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
                 .background(GeometryReader { g in
                     Color.clear.preference(key: ListHeightKey.self, value: g.size.height)
                 })
@@ -181,7 +187,9 @@ struct PopoverView: View {
         // resting state, not a fault — hatching it would cry wolf every time. Its
         // age still shows in the card header. Stored Codex accounts ARE polled, so
         // for them an old reading is a real fault, same as Claude's.
-        let isStale = acc.switchable && (acc.ageSeconds ?? 0) > 600
+        // Session-file Codex is as old as the last run and no poll can freshen
+        // it, so hatching that card would cry wolf. Everything else is polled.
+        let isStale = !(acc.provider == "codex" && !acc.switchable) && (acc.ageSeconds ?? 0) > 600
         // Manual switches take the same viability gate as the automatic one, minus
         // the threshold: a click may pick a busy account, not a dead one.
         let canSwitch = codex ? codexIsSwitchTarget(acc, threshold: 100) : isSwitchTarget(acc)
@@ -205,17 +213,18 @@ struct PopoverView: View {
                 .fill(activeHealth(claudeAccounts).color.opacity(stale ? 0.5 : 1))
                 .frame(width: 18, height: 18)
                 .overlay(Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(Noct.panelBottom))
-            Text("cbar").font(.system(size: 14, weight: .medium)).foregroundStyle(Noct.ink)
+            Text("cbar").font(.system(size: 16, weight: .medium)).foregroundStyle(Noct.ink)
             Rectangle().fill(Noct.hairline).frame(width: 1, height: 12)
-            Text(stale ? "data \(store.cacheAgeShort) old" : "Claude usage")
-                .font(.system(size: 11))
+            Text(stale ? "data \(store.cacheAgeShort) old"
+                 : (store.accounts.isEmpty ? "Claude usage" : "\(store.accounts.count) account\(store.accounts.count == 1 ? "" : "s")"))
+                .font(.system(size: 13))
                 .foregroundStyle(stale ? Noct.ink5 : Noct.ink4)
             Spacer(minLength: 4)
             statusPill
             Button { store.refresh() } label: {
-                Image(systemName: "arrow.clockwise").font(.system(size: 14))
+                Image(systemName: "arrow.clockwise").font(.system(size: 16))
             }
             .buttonStyle(HoverButtonStyle(compact: true))
             // Stale is the one time refreshing by hand is worth offering, so the
@@ -246,7 +255,7 @@ struct PopoverView: View {
         else if warm { text = "PRE-WARM ON" }
         else { text = "\(claudeAccounts.count) ACCOUNT\(claudeAccounts.count == 1 ? "" : "S")" }
         return Text(text)
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 12, weight: .medium))
             .tracking(0.6)
             .padding(.horizontal, 8).padding(.vertical, 4)
             .overlay(Capsule().stroke(armed ? Noct.accentLine : (empty ? Noct.hairlineSoft : Noct.hairline),
@@ -259,10 +268,10 @@ struct PopoverView: View {
     private func errorBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 13))
+                .font(.system(size: 15))
                 .foregroundStyle(Noct.critIcon)
             Text(message)
-                .font(.system(size: 10))
+                .font(.system(size: 12))
                 .lineSpacing(3)
                 .foregroundStyle(Noct.critText)
                 .lineLimit(3)
@@ -285,16 +294,16 @@ struct PopoverView: View {
     private func noticeBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "info.circle.fill")
-                .font(.system(size: 13))
+                .font(.system(size: 15))
                 .foregroundStyle(Noct.accentText)
             Text(message)
-                .font(.system(size: 10))
+                .font(.system(size: 12))
                 .lineSpacing(3)
                 .foregroundStyle(Noct.ink2)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button { store.dismissNotice() } label: { Image(systemName: "xmark").font(.system(size: 10)) }
+            Button { store.dismissNotice() } label: { Image(systemName: "xmark").font(.system(size: 12)) }
                 .buttonStyle(HoverButtonStyle(compact: true))
                 .foregroundStyle(Noct.ink5)
         }
@@ -308,25 +317,25 @@ struct PopoverView: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("No accounts tracked yet")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Noct.ink2)
-            Text("Log into an account in Claude Code, then Add current account. Repeat per account.")
-                .font(.system(size: 10))
+            Text("Log into an account in Claude Code, then Claude. Repeat per account.")
+                .font(.system(size: 12))
                 .lineSpacing(4)
                 .foregroundStyle(Noct.ink4)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 4) {
                 Button { store.addCurrent() } label: {
-                    Label("Add current account", systemImage: "plus.circle")
+                    Label("Claude", systemImage: "plus.circle")
                 }
-                .buttonStyle(HoverButtonStyle(font: .system(size: 11)))
+                .buttonStyle(HoverButtonStyle(font: .system(size: 13)))
                 .foregroundStyle(Noct.accentText)
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(Noct.accentLine, lineWidth: 1))
                 if store.canImportCswap {
                     Button { store.importCswap() } label: {
                         Label("Import from cswap", systemImage: "square.and.arrow.down")
                     }
-                    .buttonStyle(HoverButtonStyle(font: .system(size: 11)))
+                    .buttonStyle(HoverButtonStyle(font: .system(size: 13)))
                     .foregroundStyle(Noct.ink3)
                 }
             }
@@ -341,11 +350,11 @@ struct PopoverView: View {
 
     // MARK: footer
 
-    /// Two rows so every item carries a word — Refresh moved up to the header as a
-    /// pure icon, because it acts on the whole panel rather than on a list item.
+    /// One row of actions so the scan list is the whole panel. Refresh lives in
+    /// the header — it acts on the panel, not a list item.
     private var footer: some View {
-        VStack(spacing: 5) {
-            HStack {
+        VStack(spacing: 4) {
+            HStack(spacing: 2) {
                 Button { store.switchToBest() } label: {
                     Label("Switch to best", systemImage: "bolt.fill")
                 }
@@ -354,23 +363,18 @@ struct PopoverView: View {
                          ? RoundedRectangle(cornerRadius: 7).stroke(Noct.accentLine, lineWidth: 1)
                          : nil)
                 .disabled(!canSwitchToBest)
-                Spacer()
+                Spacer(minLength: 4)
                 Button { store.addCurrent() } label: {
-                    Label("Add current account", systemImage: "plus.circle")
+                    Label("Claude", systemImage: "plus")
                 }
                 .foregroundStyle(Noct.ink3)
-            }
-            HStack {
                 Button { store.addCodexAccount() } label: {
-                    Label("Add Codex account", systemImage: "plus.circle")
+                    Label("Codex", systemImage: "plus")
                 }
                 .foregroundStyle(Noct.ink3)
-                Spacer()
-                // Only when there is something to import: a permanently greyed
-                // button here was taking the row the Codex button needs.
                 if store.canImportCswap {
                     Button { store.importCswap() } label: {
-                        Label("Import from cswap", systemImage: "square.and.arrow.down")
+                        Label("cswap", systemImage: "square.and.arrow.down")
                     }
                     .foregroundStyle(Noct.ink3)
                 }
@@ -378,15 +382,14 @@ struct PopoverView: View {
                     .foregroundStyle(Noct.ink3)
             }
             Text(statusLine)
-                .font(.system(size: 10))
+                .font(.system(size: 12))
                 .foregroundStyle(stale ? Noct.critText : Noct.ink5)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 6)
-                .padding(.top, 2)
         }
-        .buttonStyle(HoverButtonStyle(font: .system(size: 11)))
-        .padding(.horizontal, 10)
-        .padding(.top, 10)
+        .buttonStyle(HoverButtonStyle(font: .system(size: 13)))
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
         .padding(.bottom, 8)
     }
 
@@ -409,8 +412,8 @@ struct PopoverView: View {
     }
 }
 
-/// One account: header row (dot · email · badges · ACTIVE / Switch / ✕) over a
-/// row of framed metric plots divided by hairlines.
+/// One account as a scan row: icon · email · badges / Switch over a row of
+/// 4pt meters. Tall 22pt plots made five accounts taller than the screen.
 struct AccountCard: View {
     let acc: Account
     var stale = false
@@ -428,102 +431,92 @@ struct AccountCard: View {
     var removeAction: (() -> Void)? = nil
     @ViewState private var hovering = false
 
-    private var exhausted: Bool { acc.switchable && isExhausted(acc) }
-    private var ground: Color { acc.isActive ? (stale ? Noct.cardStale : Noct.cardActive) : Noct.card }
-    private var border: Color {
-        if acc.status == "needs-reauth" { return Noct.crit.opacity(0.35) }
-        if acc.isActive { return stale ? Noct.accentFill : Noct.accentLine }
-        return Noct.hairline
+    private var exhausted: Bool {
+        if acc.switchable { return isExhausted(acc) }
+        return acc.meters.contains { $0.id.contains("7d") && $0.pct >= 99 }
+    }
+    private var reauthHint: String {
+        switch acc.provider {
+        case "codex":
+            return acc.isActive ? "Re-login needed (run codex login)" : "Re-login needed (Add Codex)"
+        case "grok": return "Re-login needed (run grok login)"
+        case "antigravity": return "Re-login needed (run agy)"
+        default: return "Re-login needed (run Claude Code login)"
+        }
     }
 
     /// Only when the age is the point — stale, or Codex, whose numbers are as old
-    /// as the last Codex run and have no fresher source to poll. On a healthy card
-    /// this line costs the email its last characters and says nothing the footer
-    /// doesn't already say.
+    /// as the last Codex run and have no fresher source to poll.
     private var ageText: String? {
         guard stale || (acc.provider == "codex" && !acc.switchable), let a = acc.ageSeconds, a > 90 else { return nil }
-        if a >= 3600 { return "cached \(Int(a / 3600))h ago" }
-        return "cached \(Int(a / 60))m ago"
+        if a >= 3600 { return "\(Int(a / 3600))h ago" }
+        return "\(Int(a / 60))m ago"
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            headerRow
-            // No rule between the header and the plots: the grid's 1pt gaps are
-            // the only lines inside a card, and they run vertically. The header's
-            // own bottom padding does the separating.
-            if !acc.meters.isEmpty { plots } else { statusNote }
+        HStack(alignment: .center, spacing: 10) {
+            ProviderMark(kind: .card(acc.provider), size: 22, dimmed: stale)
+            VStack(alignment: .leading, spacing: 7) {
+                headerRow
+                if acc.meters.isEmpty { statusNote } else { meters }
+            }
         }
-        .background(ground)
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(border, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background {
+            if acc.isActive && !stale {
+                LinearGradient(stops: [.init(color: Noct.accent.opacity(0.14), location: 0),
+                                       .init(color: Noct.accent.opacity(0), location: 0.72)],
+                               startPoint: .leading, endPoint: .trailing)
+            } else if hovering {
+                Color.primary.opacity(0.04)
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(border, lineWidth: acc.isActive || acc.status == "needs-reauth" ? 1 : 0))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .contentShape(RoundedRectangle(cornerRadius: 9))
         .animation(.easeOut(duration: 0.12), value: hovering)
         .onHover { hovering = $0 }
     }
 
+    private var border: Color {
+        if acc.status == "needs-reauth" { return Noct.crit.opacity(0.35) }
+        if acc.isActive { return stale ? Noct.accentFill : Noct.accentLine }
+        return .clear
+    }
+
     private var headerRow: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(acc.isActive ? Noct.accent.opacity(stale ? 0.5 : 1) : Noct.ink6)
-                .frame(width: 7, height: 7)
-                // The halo marks the active account at 7pt, where a colored dot
-                // alone is easy to miss against three others.
-                .overlay(Circle().stroke(Noct.accent.opacity(acc.isActive && !stale ? 0.2 : 0), lineWidth: 3))
+        HStack(spacing: 6) {
             Text(acc.email)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(acc.isActive && !stale ? Noct.ink : Noct.ink2)
                 .lineLimit(1)
             if let ageText {
-                Text("· \(ageText)").font(.system(size: 10)).foregroundStyle(Noct.ink5).lineLimit(1)
+                Text(ageText).font(.system(size: 12)).foregroundStyle(Noct.ink5).lineLimit(1)
             }
             if exhausted {
-                Badge(text: "WEEK EXHAUSTED", fg: Noct.critIcon, bg: Noct.crit.opacity(0.16))
+                Badge(text: "EXH", fg: Noct.critIcon, bg: Noct.crit.opacity(0.16))
             }
             if acc.status == "needs-reauth" {
                 Badge(text: "RE-LOGIN", fg: Noct.critIcon, bg: Noct.crit.opacity(0.16))
             }
             if isNextTarget && !acc.isActive {
-                Badge(text: "NEXT TARGET",
+                Badge(text: "NEXT",
                       fg: Metric.number(for: "5h"), bg: Metric.color(for: "5h").opacity(0.16))
             }
-            Spacer(minLength: 6)
+            Spacer(minLength: 4)
             trailingControls
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 11)
-        .padding(.bottom, acc.meters.isEmpty ? 2 : 10)
-        .background(alignment: .leading) {
-            // The active card's header carries a short wash of the accent, fading
-            // out by 70%. Chrome, not hue on data.
-            if acc.isActive && !stale {
-                LinearGradient(stops: [.init(color: Noct.accent.opacity(0.14), location: 0),
-                                       .init(color: Noct.accent.opacity(0), location: 0.7)],
-                               startPoint: .leading, endPoint: .trailing)
-            }
         }
     }
 
-    /// Why a card has no numbers, said in the card. "no data yet" was hiding a
-    /// slot with no keychain item at all for 17 h (2026-07-25). In the card's
-    /// vertical flow, not an overlay: an overlaid note with negative padding drew
-    /// past the card's clip bounds and got sliced off (2026-08-27).
     @ViewBuilder private var statusNote: some View {
-        if acc.meters.isEmpty {
-            Text(acc.status == "needs-reauth"
-                 ? (acc.provider != "codex" ? "Re-login needed (run Claude Code login)"
-                    // The live account re-logs in where it lives; any other one
-                    // through the inbox, so `codex login` can't revoke the live one.
-                    : acc.isActive ? "Re-login needed (run codex login)" : "Re-login needed (Add Codex account)")
-                 : acc.status == "ok" ? "no data yet" : acc.status)
-                .font(.system(size: 10))
-                .foregroundStyle(Noct.ink5)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 27)
-                .padding(.trailing, 12)
-                .padding(.bottom, 11)
-        }
+        Text(acc.status == "needs-reauth"
+             ? reauthHint
+             : acc.status == "ok" ? "no data yet" : acc.status)
+            .font(.system(size: 12))
+            .foregroundStyle(Noct.ink5)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder private var trailingControls: some View {
@@ -539,12 +532,12 @@ struct AccountCard: View {
                 // available: getting rid of a dead slot is the point.
                 if canSwitch {
                     Button("Switch", action: switchAction)
-                        .buttonStyle(HoverButtonStyle(compact: true, font: .system(size: 11)))
+                        .buttonStyle(HoverButtonStyle(compact: true, font: .system(size: 13)))
                         .foregroundStyle(Noct.accentText)
                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(Noct.accentLine, lineWidth: 1))
                 }
                 if let removeAction {
-                    Button(action: removeAction) { Image(systemName: "xmark").font(.system(size: 10)) }
+                    Button(action: removeAction) { Image(systemName: "xmark").font(.system(size: 12)) }
                         .buttonStyle(HoverButtonStyle(compact: true))
                         .foregroundStyle(hovering ? Noct.ink3 : Noct.ink5)
                 }
@@ -552,51 +545,48 @@ struct AccountCard: View {
         }
     }
 
-    /// Every metric its own cell, split by 1pt solid rules — solid, because these
-    /// divide data rather than sections, and a fading rule between two numbers
-    /// reads as decoration.
-    private var plots: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(acc.meters.enumerated()), id: \.element.id) { i, m in
-                if i > 0 { Rectangle().fill(Noct.ink.opacity(0.08)).frame(width: 1) }
-                MeterPlot(label: m.id,
+    private var meters: some View {
+        HStack(spacing: 12) {
+            ForEach(acc.meters) { m in
+                ScanMeter(label: meterLabel(m.id),
                           pct: m.pct,
                           caption: caption(for: m),
                           captionColor: captionColor(for: m),
+                          mark: ProviderMark.Kind.meter(m.id),
                           color: Metric.color(for: m.id),
-                          // A non-active account's numbers stay neutral: hue on
-                          // every card at once would make none of them the subject.
                           numberColor: acc.isActive ? Metric.number(for: m.id) : Noct.ink2,
                           threshold: m.id == switchMeter && acc.isActive ? threshold : nil,
                           stale: stale)
-                .frame(maxWidth: .infinity)
             }
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// The caption says the most useful thing available, in this order: why this
-    /// metric is about to cause a switch, why this account is the destination,
-    /// how old the reading is, then the plain reset countdown.
+    /// Strip the pool prefix ("Gem 7d" → "7d"); the meter icon names the pool.
+    private func meterLabel(_ id: String) -> String {
+        if id.hasPrefix("Gem ") { return String(id.dropFirst(4)) }
+        if id.hasPrefix("Cl ") { return String(id.dropFirst(3)) }
+        return id
+    }
+
+    /// Reset remaining first — that is why the row exists. Switch notes outrank
+    /// it only when this meter is the reason a click or auto-switch is about to
+    /// fire. Prefer `resetsAt` so the string is not a snapshot from fetch time.
     private func caption(for m: Meter) -> String? {
         if m.id == switchMeter, acc.isActive, let t = threshold, m.pct >= t {
-            return "over thr. \(Int(t))%"
+            return "over \(Int(t))%"
         }
         if m.id == switchMeter, isNextTarget, !acc.isActive { return "most headroom" }
-        // The reset countdown outranks the reading's age, including when the
-        // reading is stale. How old the number is already appears in the card
-        // header and in the hatched fill; when the window resets appears nowhere
-        // else, and it is the fact you act on. This is where 3e is not followed:
-        // Codex is ALWAYS minutes behind (its numbers are as old as the last Codex
-        // run), so spending its one caption on "as of 35m ago" left the card
-        // saying nothing but its own staleness, twice.
-        if let c = m.countdown { return "resets \(c)" }
+        let remain = CodexProvider.countdown(m.resetsAt, now: Date().timeIntervalSince1970)
+            ?? m.countdown
+        if let c = remain { return "reset in \(c)" }
+        if m.pct >= 99 { return "exhausted" }
         if stale, let a = acc.ageSeconds { return "as of \(Int(a / 60))m ago" }
         return nil
     }
 
     private func captionColor(for m: Meter) -> Color? {
         if stale { return nil }
+        if m.pct >= 99 { return Noct.critText }
         if m.id == switchMeter, acc.isActive, let t = threshold, m.pct >= t { return Noct.critText }
         if m.id == switchMeter, isNextTarget, !acc.isActive { return Metric.number(for: "5h") }
         return nil

@@ -100,8 +100,10 @@ public enum CodexUsageMapper {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         var limits = [o["rate_limit"] as? [String: Any]]
         limits += ((o["additional_rate_limits"] as? [[String: Any]]) ?? []).map { $0["rate_limit"] as? [String: Any] }
-        return limits.flatMap { rl in
-            ["primary_window", "secondary_window"].compactMap { (rl?[$0] as? [String: Any]).flatMap { num($0["reset_at"]) } }
+        return limits.flatMap { rl -> [Double] in
+            ["primary_window", "secondary_window"].compactMap { key in
+                (rl?[key] as? [String: Any]).flatMap { resetEpoch($0, now: Date().timeIntervalSince1970) }
+            }
         }.min()
     }
 
@@ -120,11 +122,32 @@ public enum CodexUsageMapper {
             } else {
                 id = window
             }
-            return Meter(id: id, pct: pct, countdown: CodexProvider.countdown(num(w["reset_at"]), now: now))
+            let reset = resetEpoch(w, now: now)
+            return Meter(id: id, pct: pct,
+                         countdown: CodexProvider.countdown(reset, now: now),
+                         resetsAt: reset)
         }
     }
 
-    private static func num(_ v: Any?) -> Double? { (v as? Double) ?? (v as? Int).map(Double.init) }
+    /// `reset_at` is the absolute time; recent `/wham/usage` bodies omit it and
+    /// only send `reset_after_seconds`. Either is enough to put a countdown on
+    /// the Codex row. JSONSerialization numbers arrive as NSNumber, so `as? Double`
+    /// alone misses integer timestamps.
+    static func resetEpoch(_ w: [String: Any], now: Double) -> Double? {
+        if let r = num(w["reset_at"]) ?? num(w["resets_at"]) { return r }
+        if let s = (w["reset_at"] as? String) ?? (w["resets_at"] as? String),
+           let d = UsageMapper.parseISO(s) { return d.timeIntervalSince1970 }
+        if let after = num(w["reset_after_seconds"]), after > 0 { return now + after }
+        return nil
+    }
+
+    private static func num(_ v: Any?) -> Double? {
+        if let d = v as? Double { return d }
+        if let i = v as? Int { return Double(i) }
+        if let n = v as? NSNumber { return n.doubleValue }
+        if let s = v as? String { return Double(s) }
+        return nil
+    }
 }
 
 /// Paced per-account Codex usage, the counterpart of `UsageService`: one fetch

@@ -177,7 +177,7 @@ public final class CodexProvider: Provider {
     }
 
     /// "1h 15m" / "6d 7h" / "12m" from a reset unix timestamp.
-    static func countdown(_ resetsAt: Double?, now: Double) -> String? {
+    public static func countdown(_ resetsAt: Double?, now: Double) -> String? {
         guard let r = resetsAt else { return nil }
         let secs = Int(r - now)
         if secs <= 0 { return "now" }

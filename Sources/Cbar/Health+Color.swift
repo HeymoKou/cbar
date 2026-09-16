@@ -91,12 +91,16 @@ enum Noct {
 /// Same mapping for Claude and Codex so a metric's color is consistent everywhere.
 enum Metric {
     static func color(for id: String) -> Color {
-        switch id {
-        case "5h":  return dynamic(light: 0x2a78d6, dark: 0x3987e5)   // blue
-        case "7d":  return dynamic(light: 0x1baf7a, dark: 0x199e70)   // aqua
-        case "Fbl": return dynamic(light: 0xeda100, dark: 0xc98500)   // yellow
-        default:    return dynamic(light: 0x4a3aa7, dark: 0x9085e9)   // violet (fallback)
+        if id == "5h" || id.hasSuffix("5h") {
+            return dynamic(light: 0x2a78d6, dark: 0x3987e5)   // blue
         }
+        if id == "7d" || id == "30d" || id.hasSuffix("7d") {
+            return dynamic(light: 0x1baf7a, dark: 0x199e70)   // aqua
+        }
+        if id == "Fbl" {
+            return dynamic(light: 0xeda100, dark: 0xc98500)   // yellow
+        }
+        return dynamic(light: 0x4a3aa7, dark: 0x9085e9)       // violet (fallback)
     }
 
     /// The big percentage reads in its metric's hue pushed AWAY from the ground —
@@ -104,11 +108,15 @@ enum Metric {
     /// the number and the plot under it are visibly one object; different
     /// lightness, so a 22pt numeral does not glare at bar saturation.
     static func number(for id: String) -> Color {
-        switch id {
-        case "5h":  return dynamic(light: 0x1b5aa8, dark: 0x8cc0f5)
-        case "7d":  return dynamic(light: 0x127754, dark: 0x5ad0a3)
-        case "Fbl": return dynamic(light: 0x8f5e00, dark: 0xe5b64a)
-        default:    return dynamic(light: 0x372a86, dark: 0xb5abfc)
+        if id == "5h" || id.hasSuffix("5h") {
+            return dynamic(light: 0x1b5aa8, dark: 0x8cc0f5)
         }
+        if id == "7d" || id == "30d" || id.hasSuffix("7d") {
+            return dynamic(light: 0x127754, dark: 0x5ad0a3)
+        }
+        if id == "Fbl" {
+            return dynamic(light: 0x8f5e00, dark: 0xe5b64a)
+        }
+        return dynamic(light: 0x372a86, dark: 0xb5abfc)
     }
 }

@@ -13,7 +13,7 @@ final class StatusItemController: NSObject {
 
     /// Taken from the view rather than restated: these drifted apart once already
     /// (the panel stayed 340 when the popover went to 372) and the panel silently
-    /// clipped 32pt off the right of every card.
+    /// clipped 32pt off the right of every card. Width follows `PopoverView`.
     private let width = PopoverView.panelWidth
     private var contentHeight: CGFloat = 420
 

@@ -465,6 +465,12 @@ assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10), mkAc
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 50), mkAcc(2, false, 10)], threshold: 94) == nil, "below threshold -> no switch")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 96)], threshold: 94) == nil, "no better account -> no switch")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10, provider: "codex")], threshold: 94) == nil, "codex not a switch target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10, provider: "grok")], threshold: 94) == nil, "grok not a switch target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10, provider: "antigravity")], threshold: 94) == nil, "antigravity not a switch target")
+assert(mkAcc(1, false, 10, provider: "grok").switchable == false)
+assert(mkAcc(1, false, 10, provider: "antigravity").switchable == false)
+assert(Account(id: "g", number: 1, email: "g", org: "", isActive: true, status: "ok",
+               meters: [Meter(id: "7d", pct: 99, countdown: nil)], ageSeconds: 1, provider: "grok").switchable == false)
 // Only the 5h window triggers. Fable and 7d are both excluded: the real
 // 2026-07-25 state was 5h=3% / 7d=91%, which wanted to rotate every poll off an
 // account with a nearly empty 5-hour window.
@@ -1065,6 +1071,11 @@ let cxProlite = #"{"plan_type":"prolite","rate_limit":{"allowed":false,"limit_re
 let cxProMeters = try CodexUsageMapper.meters(from: Data(cxProlite.utf8), now: cxNow)
 assert(cxProMeters.map(\.id) == ["7d"], "weekly-only plan → one 7d meter, unused Spark hidden: \(cxProMeters.map(\.id))")
 assert(cxProMeters[0].pct == 100 && cxProMeters[0].countdown == "2d 20h")
+let cxAfterOnly = #"{"rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_after_seconds":90000},"secondary_window":null}}"#
+let cxAfterMeters = try CodexUsageMapper.meters(from: Data(cxAfterOnly.utf8), now: cxNow)
+assert(cxAfterMeters.count == 1 && cxAfterMeters[0].countdown == "1d 1h",
+       "reset_after_seconds alone still yields a countdown: \(cxAfterMeters.first?.countdown ?? "nil")")
+assert(cxAfterMeters[0].resetsAt == cxNow + 90_000)
 assert(CodexUsageMapper.soonestReset(from: Data(cxProlite.utf8)) == 2000018000, "soonest reset spans every window")
 let cxTeamUsage = #"{"rate_limit":{"primary_window":{"used_percent":42.5,"limit_window_seconds":18000,"reset_at":2000003600},"secondary_window":{"used_percent":61,"limit_window_seconds":604800,"reset_at":2000090000}},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":{"used_percent":12,"limit_window_seconds":18000,"reset_at":2000007200},"secondary_window":null}}]}"#
 let cxTeamMeters = try CodexUsageMapper.meters(from: Data(cxTeamUsage.utf8), now: cxNow)
@@ -1152,6 +1163,181 @@ try! Data("{\"codexAutoSwitchEnabled\":true}".utf8).write(to: URL(fileURLWithPat
 assert(CbarConfig.load(dir: cfgDir).codexAutoSwitchEnabled, "codexAutoSwitchEnabled: true is honored")
 print("CONFIG DEFAULTS + SEED OK")
 
+// Grok billing mapper: percent present, percent absent must not become 0,
+// monthly used/limit fallback, on-demand cap, period labels.
+let grokWeekly = Data(#"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-09-10T00:00:00Z","end":"2026-09-17T00:00:00Z"},"creditUsagePercent":34.0,"subscriptionTierDisplay":"SuperGrok"}}"#.utf8)
+let grokMeters = try GrokUsageMapper.meters(from: grokWeekly, now: 1_747_000_000)
+assert(grokMeters.count == 1 && grokMeters[0].id == "7d" && Int(grokMeters[0].pct) == 34, "weekly percent → 7d")
+assert(GrokUsageMapper.plan(from: grokWeekly) == "SuperGrok")
+assert(GrokUsageMapper.percent(in: grokWeekly) == 34)
+let grokNoPct = Data(#"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-09-17T00:00:00Z"},"isUnifiedBillingUser":true}}"#.utf8)
+assert(GrokUsageMapper.percent(in: grokNoPct) == nil)
+let grokNoPctMeters = try GrokUsageMapper.meters(from: grokNoPct, now: 1_747_000_000)
+assert(grokNoPctMeters.isEmpty, "absent percent is not 0")
+let grokMonthly = Data(#"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_MONTHLY","end":"2026-10-01T00:00:00Z"},"monthlyLimit":{"val":10000},"used":{"val":2500}}}"#.utf8)
+let grokMo = try GrokUsageMapper.meters(from: grokMonthly, now: 1_747_000_000)
+assert(grokMo.count == 1 && grokMo[0].id == "30d" && Int(grokMo[0].pct) == 25, "monthly used/limit")
+let grokOD = Data(#"{"config":{"onDemandCap":{"val":100},"onDemandUsed":{"val":40}}}"#.utf8)
+let grokOdM = try GrokUsageMapper.meters(from: grokOD, now: 1_747_000_000)
+assert(grokOdM.count == 1 && grokOdM[0].id == "OD" && Int(grokOdM[0].pct) == 40, "on-demand fallback")
+let grokAuthDir = NSTemporaryDirectory() + "cbar-selftest-grok-\(getpid())"
+try! FileManager.default.createDirectory(atPath: grokAuthDir, withIntermediateDirectories: true)
+let grokAuthPath = grokAuthDir + "/auth.json"
+try! Data(#"{"https://auth.x.ai::abc":{"key":"tok-1","refresh_token":"rt-1","expires_at":"2099-01-01T00:00:00Z","email":"g@x.ai","oidc_client_id":"abc","auth_mode":"oidc"}}"#.utf8).write(to: URL(fileURLWithPath: grokAuthPath))
+let grokLogin = GrokAuth.read(path: grokAuthPath)
+assert(grokLogin?.email == "g@x.ai" && grokLogin?.accessToken == "tok-1" && grokLogin?.refreshToken == "rt-1")
+assert(grokLogin?.isExpired(now: Date(timeIntervalSince1970: 1_700_000_000)) == false)
+try GrokAuth.persistRefresh(access: "tok-2", refresh: "rt-2",
+                            expiresAt: Date(timeIntervalSince1970: 2_000_000_000), path: grokAuthPath)
+let grokAfter = GrokAuth.read(path: grokAuthPath)
+assert(grokAfter?.accessToken == "tok-2" && grokAfter?.refreshToken == "rt-2", "rotation persisted")
+assert(GrokUsageService.shouldSkipRefresh(grokRunning: true))
+assert(!GrokUsageService.shouldSkipRefresh(grokRunning: false))
+final class FakeGrokAPI: GrokAPI {
+    var fetched: [String] = []
+    var refreshedWith: [String] = []
+    var usage = grokWeekly
+    var fetchError: Error?
+    var refreshError: Error?
+    var refreshResult: (access: String, refresh: String?, expiresIn: Double) = ("tok-new", "rt-new", 3600)
+    func fetchBillingRaw(accessToken: String) throws -> Data {
+        fetched.append(accessToken)
+        if let e = fetchError { throw e }
+        return usage
+    }
+    func refresh(refreshToken: String, clientID: String) throws -> (access: String, refresh: String?, expiresIn: Double) {
+        refreshedWith.append(refreshToken)
+        if let e = refreshError { throw e }
+        return refreshResult
+    }
+}
+do {
+    let cache = grokAuthDir + "/cache-skip.json"
+    try! Data(#"{"https://auth.x.ai::abc":{"key":"tok-old","refresh_token":"rt-1","expires_at":"2020-01-01T00:00:00Z","email":"g@x.ai","oidc_client_id":"abc"}}"#.utf8).write(to: URL(fileURLWithPath: grokAuthPath))
+    let api = FakeGrokAPI()
+    let svc = GrokUsageService(client: api, authPath: grokAuthPath, cachePath: cache, grokRunning: { true })
+    let a = svc.accounts(now: 1_800_000_000)
+    assert(api.refreshedWith.isEmpty && api.fetched.isEmpty, "grok running: expired token not refreshed")
+    assert(a.first?.provider == "grok" && a.first?.switchable == false)
+    assert(a.first?.status != "ok", "skipped refresh is not a fresh ok reading")
+}
+do {
+    let cache = grokAuthDir + "/cache-refresh.json"
+    try! Data(#"{"https://auth.x.ai::abc":{"key":"tok-old","refresh_token":"rt-1","expires_at":"2020-01-01T00:00:00Z","email":"g@x.ai","oidc_client_id":"abc"}}"#.utf8).write(to: URL(fileURLWithPath: grokAuthPath))
+    let api = FakeGrokAPI()
+    let svc = GrokUsageService(client: api, authPath: grokAuthPath, cachePath: cache, grokRunning: { false })
+    let a = svc.accounts(now: 1_800_000_000)
+    assert(api.refreshedWith == ["rt-1"], "idle grok: refresh")
+    assert(api.fetched == ["tok-new"], "fetch uses rotated token")
+    assert(GrokAuth.read(path: grokAuthPath)?.accessToken == "tok-new", "rotation on disk")
+    assert(a.first?.status == "ok" && Int(a.first?.meters.first?.pct ?? 0) == 34)
+}
+try? FileManager.default.removeItem(atPath: grokAuthDir)
+print("GROK USAGE OK")
+
+// Antigravity quota summary + keyring blob + client-id extract.
+let agyQuota = Data(#"""
+{"groups":[
+  {"displayName":"Gemini Models","buckets":[
+    {"displayName":"Five Hour Limit","remainingFraction":0.6,"resetTime":"2026-09-17T12:00:00Z"},
+    {"displayName":"Weekly Limit","remainingFraction":0.25,"resetTime":"2026-09-20T00:00:00Z"}
+  ]},
+  {"displayName":"Claude and GPT models","buckets":[
+    {"displayName":"Five Hour Limit","remainingFraction":1,"resetTime":"2026-09-17T12:00:00Z"},
+    {"displayName":"Weekly Limit","remainingFraction":0.9,"resetTime":"2026-09-20T00:00:00Z"}
+  ]}
+]}
+"""#.utf8)
+let agyMeters = try AntigravityUsageMapper.meters(from: agyQuota, now: 1_747_000_000)
+assert(agyMeters.map(\.id) == ["Gem 5h", "Gem 7d", "Cl 5h", "Cl 7d"], "group prefixes, 5h then 7d: \(agyMeters.map(\.id))")
+assert(Int(agyMeters[0].pct) == 40 && Int(agyMeters[1].pct) == 75, "used = 1 − remaining")
+assert(Int(agyMeters[2].pct) == 0, "untouched bucket is 0 used, not missing")
+let agyOne = Data(#"{"groups":[{"displayName":"Gemini Models","buckets":[{"displayName":"Weekly Limit","remainingFraction":0.5,"resetTime":"2026-09-20T00:00:00Z"}]}]}"#.utf8)
+let agyOneM = try AntigravityUsageMapper.meters(from: agyOne, now: 1_747_000_000)
+assert(agyOneM.count == 1 && agyOneM[0].id == "7d", "single group keeps the plain window id")
+let agyLoad = Data(#"{"cloudaicompanionProject":"proj-1","paidTier":{"id":"ultra","name":"Google AI Ultra"},"currentTier":{"id":"free-tier"}}"#.utf8)
+assert(AntigravityUsageMapper.project(from: agyLoad) == "proj-1")
+assert(AntigravityUsageMapper.plan(from: agyLoad) == "Google AI Ultra")
+assert(AntigravityUsageMapper.groupPrefix("Gemini Models") == "Gem")
+assert(AntigravityUsageMapper.groupPrefix("Claude and GPT models") == "Cl")
+func agyJWT(_ email: String) -> String {
+    let payload = Data("{\"email\":\"\(email)\"}".utf8).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return "e30.\(payload).x"
+}
+let agyBlobJSON = "{\"token\":{\"access_token\":\"at-1\",\"refresh_token\":\"rt-1\",\"expiry\":\"2099-01-01T00:00:00Z\"},\"id_token\":\"\(agyJWT("agy@x.com"))\"}"
+let agyB64 = Data(agyBlobJSON.utf8).base64EncodedString()
+let agyCreds = AntigravityAuth.read(raw: "go-keyring-base64:\(agyB64)")
+assert(agyCreds?.accessToken == "at-1" && agyCreds?.refreshToken == "rt-1")
+assert(agyCreds?.email == "agy@x.com", "email from id_token: \(agyCreds?.email ?? "nil")")
+assert(AntigravityAuth.read(raw: agyBlobJSON)?.email == "agy@x.com", "bare JSON also parses")
+let agyBinDir = NSTemporaryDirectory() + "cbar-selftest-agybin-\(getpid())"
+try! FileManager.default.createDirectory(atPath: agyBinDir, withIntermediateDirectories: true)
+let agyBin = agyBinDir + "/agy"
+var agyBinBytes = Data("noise-".utf8)
+agyBinBytes += Data("1071006060591-abc123.apps.googleusercontent.com".utf8)
+agyBinBytes += Data("-mid-".utf8)
+agyBinBytes += Data("GOCSPX-abcdefghijklmnopqrstuv".utf8)
+agyBinBytes += Data("-end".utf8)
+try! agyBinBytes.write(to: URL(fileURLWithPath: agyBin))
+let extracted = AntigravityOAuth.extract(from: agyBin)
+assert(extracted?.id == "1071006060591-abc123.apps.googleusercontent.com", "id=\(extracted?.id ?? "nil")")
+assert(extracted?.secret.hasPrefix("GOCSPX-abcdefghijklmnopqrstuv") == true, "secret=\(extracted?.secret ?? "nil")")
+final class FakeAgyAPI: AntigravityAPI {
+    var loaded = 0
+    var summarized = 0
+    var refreshed = 0
+    var quota = agyOne
+    var load = agyLoad
+    var fetchError: Error?
+    var refreshError: Error?
+    func loadCodeAssist(accessToken: String) throws -> Data {
+        loaded += 1
+        if let e = fetchError { throw e }
+        return load
+    }
+    func quotaSummary(accessToken: String, project: String?) throws -> Data {
+        summarized += 1
+        if let e = fetchError { throw e }
+        return quota
+    }
+    var modelsData = Data(#"{"models":{}}"#.utf8)
+    func fetchAvailableModels(accessToken: String) throws -> Data { modelsData }
+    func refresh(refreshToken: String, clientID: String, clientSecret: String) throws -> (access: String, expiresIn: Double) {
+        refreshed += 1
+        if let e = refreshError { throw e }
+        return ("at-new", 3600)
+    }
+}
+do {
+    let cache = agyBinDir + "/cache.json"
+    let api = FakeAgyAPI()
+    let cred = AntigravityCreds(accessToken: "at-1", refreshToken: "rt-1",
+                                expiry: Date(timeIntervalSince1970: 2_000_000_000), email: "agy@x.com")
+    let svc = AntigravityUsageService(client: api, creds: { cred },
+                                      oauthClient: { ("id", "secret") }, cachePath: cache)
+    let a = svc.accounts(now: 1_800_000_000)
+    assert(api.loaded == 1 && api.summarized == 1 && api.refreshed == 0)
+    assert(a.first?.provider == "antigravity" && a.first?.switchable == false)
+    assert(a.first?.status == "ok" && a.first?.email == "agy@x.com")
+    assert(a.first?.org == "Google · Google AI Ultra")
+    assert(a.first?.meters.first?.id == "7d")
+}
+let agyModels = Data(#"""
+{"models":{
+  "gemini-flash":{"displayName":"Gemini 3 Flash","quotaInfo":{"remainingFraction":0.5,"resetTime":"2026-09-17T06:00:00Z"}},
+  "gemini-pro":{"displayName":"Gemini 3.1 Pro (High)","quotaInfo":{"remainingFraction":0.8,"resetTime":"2026-09-24T00:00:00Z"}},
+  "claude":{"displayName":"Claude Sonnet 4.6","quotaInfo":{"remainingFraction":0.25,"resetTime":"2026-09-24T00:00:00Z"}},
+  "hidden":{"displayName":"Internal","isInternal":true,"quotaInfo":{"remainingFraction":0.1,"resetTime":"2026-09-17T06:00:00Z"}}
+}}
+"""#.utf8)
+let agyFromModels = try AntigravityUsageMapper.metersFromModels(from: agyModels, now: 1_789_617_600) // 2026-09-17T04:00:00Z
+assert(agyFromModels.map(\.id) == ["Gem 5h", "Gem 7d", "Cl 7d"], "grouped by pool+window: \(agyFromModels.map(\.id))")
+assert(agyFromModels.map { Int($0.pct.rounded()) } == [50, 20, 75], "pcts=\(agyFromModels.map(\.pct))")
+try? FileManager.default.removeItem(atPath: agyBinDir)
+print("ANTIGRAVITY USAGE OK")
+
 if CommandLine.arguments.contains("--live") {
     let start = Date()
     let live = try UsageService().accounts()
@@ -1171,6 +1357,26 @@ if CommandLine.arguments.contains("--live") {
               " age=\(cx.ageSeconds.map { "\(Int($0))s" } ?? "?")")
     } else {
         print("CODEX LIVE: no session rate-limit data found (\(cxMs)ms)")
+    }
+
+    let grokStart = Date()
+    let grokAccts = GrokUsageService().accounts()
+    let grokMs = Int(Date().timeIntervalSince(grokStart) * 1000)
+    if let g = grokAccts.first {
+        print("GROK LIVE: \(g.email) [\(g.org)] in \(grokMs)ms status=\(g.status) — " +
+              g.meters.map { "\($0.id)=\(Int($0.pct))% (\($0.countdown ?? "—"))" }.joined(separator: " "))
+    } else {
+        print("GROK LIVE: no ~/.grok/auth.json (\(grokMs)ms)")
+    }
+
+    let agyStart = Date()
+    let agyAccts = AntigravityUsageService().accounts()
+    let agyMs = Int(Date().timeIntervalSince(agyStart) * 1000)
+    if let a = agyAccts.first {
+        print("ANTIGRAVITY LIVE: \(a.email) [\(a.org)] in \(agyMs)ms status=\(a.status) — " +
+              a.meters.map { "\($0.id)=\(Int($0.pct))% (\($0.countdown ?? "—"))" }.joined(separator: " "))
+    } else {
+        print("ANTIGRAVITY LIVE: no Keychain login (\(agyMs)ms)")
     }
 
     // native OAuth usage fetch for the active account (meaningful once 429 clears)

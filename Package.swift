@@ -6,7 +6,8 @@ let package = Package(
     platforms: [.macOS(.v14)],   // @Observable requires macOS 14
     targets: [
         .target(name: "CbarCore"),
-        .executableTarget(name: "Cbar", dependencies: ["CbarCore"]),
+        .executableTarget(name: "Cbar", dependencies: ["CbarCore"],
+                          resources: [.copy("Resources")]),
         .executableTarget(name: "CbarSelfTest", dependencies: ["CbarCore"]),
     ],
     // ponytail: Swift 5 language mode — a tiny menu-bar app doesn't need Swift 6

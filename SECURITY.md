@@ -26,6 +26,10 @@ bounty.
 | The live Codex login cbar reads and rewrites | `~/.codex/auth.json` (Codex's own file) | `0600` |
 | A Codex login being added, until the next poll imports it | `~/.cbar/codex-login/auth.json` (written by `codex login`) | `0600` |
 | Codex account emails, plans, identities; usage history | `~/.cbar/codex-accounts.json`, `~/.cbar/codex-usage-cache.json` | `0600` |
+| Grok Build usage history | `~/.cbar/grok-usage-cache.json` | `0600` |
+| Antigravity usage history | `~/.cbar/antigravity-usage-cache.json` | `0600` |
+| The live Grok Build login cbar reads (and rewrites only to persist a token it just rotated, and only while `grok` is not running) | `~/.grok/auth.json` (Grok's own file) | `0600` |
+| The live Antigravity / `agy` login | Keychain, service `gemini`, account `antigravity` | Keychain ACL |
 
 No Claude token is ever written outside the Keychain. Codex logins are ~4 KB,
 too big for `security -i` (next section), so they are sealed on disk under a
@@ -60,6 +64,16 @@ who can read the key can read the logins — the same exposure the
   has rotated it. Idle accounts exist only in cbar's store, so cbar refreshes
   those itself and persists the rotation before using it. A switch saves the
   outgoing login first and refuses to overwrite a login it cannot restore.
+- **Grok's live login belongs to Grok while `grok` is running.** cbar reads
+  `~/.grok/auth.json` for a usage snapshot and will not refresh that token if a
+  `grok` process is alive. When grok is not running, an expired token is
+  refreshed against `auth.x.ai` and the rotation is written back before use —
+  same persist-before-use rule as an idle Codex slot. Grok and Antigravity
+  cards cannot switch accounts.
+- **Antigravity's Keychain item is read-only.** cbar never writes the
+  `gemini`/`antigravity` item (a `security` rewrite would change its ACL). An
+  expired Google access token is refreshed in memory with the OAuth client
+  extracted from the `agy` binary; the new access token is not persisted.
 
 ## Contributing safely
 
