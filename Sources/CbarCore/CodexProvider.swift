@@ -9,9 +9,28 @@ public final class CodexProvider: Provider {
     private let sessionsDir: String
     private let walkTTL: TimeInterval
 
-    /// Which file the last tree walk picked, and when it walked. Reached only
-    /// from cbar's serial mutation queue (`UsageStore.refresh`), so no lock.
-    private var cachedNewest: (url: URL, at: Date)?
+    /// Which files the last tree walk picked (newest first), and when it walked.
+    /// Reached only from cbar's serial mutation queue (`UsageStore.refresh`), so
+    /// no lock — `barren` below likewise.
+    private var cachedSessions: (urls: [URL], at: Date)?
+
+    /// Sessions already read and found to hold no usable snapshot, valid while
+    /// the file's (mtime, size) is unchanged. A refused session is written once
+    /// and never again, so without this every pass would re-read and re-parse
+    /// it on the way to the one that has data — ~200 ms for a 14 MB session, and
+    /// with an API-key login no session ever has any.
+    private var barren: [String: FileStamp] = [:]
+
+    struct FileStamp: Equatable { let mtime: Date; let size: Int }
+
+    /// How many of the newest sessions to try before giving up. Not 1: when an
+    /// account is at its limit Codex refuses each new session outright, and the
+    /// file it leaves holds only a reason-only `premium` row with both windows
+    /// null. Reading just the newest file made the card VANISH at exactly the
+    /// moment its 100% mattered — three such sessions in a row did it on
+    /// 2026-09-15. Deep enough to ride out a run of retries; the cap is what an
+    /// account that never records rate limits costs, once, at launch.
+    static let fallbackDepth = 16
 
     public init(sessionsDir: String = "\(NSHomeDirectory())/.codex/sessions",
                 walkTTL: TimeInterval = 300) {
@@ -19,49 +38,67 @@ public final class CodexProvider: Provider {
         self.walkTTL = walkTTL
     }
 
+    /// The newest session that measured something. An older session's reading
+    /// carries its own timestamp, so the card shows its true age rather than
+    /// posing as current.
     public func accounts() throws -> [Account] {
-        guard let url = newestSessionCached(now: Date()),
-              let content = try? String(contentsOf: url, encoding: .utf8),
-              let acc = Self.parse(content, now: Date().timeIntervalSince1970) else { return [] }
-        return [acc]
+        let now = Date()
+        for url in sessionsCached(now: now) {
+            guard let stamp = Self.stamp(url), barren[url.path] != stamp,
+                  let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            if let acc = Self.parse(content, now: now.timeIntervalSince1970) { return [acc] }
+            // Stamped BEFORE the read: a session that grew in between gets a
+            // stale stamp and is simply read again next pass.
+            barren[url.path] = stamp
+        }
+        return []
     }
 
-    /// `newestSession` stats every file in the sessions tree — 6,800 of them on
+    /// `newestSessions` stats every file in the sessions tree — 6,800 of them on
     /// the machine this was measured on, ~29 ms warm — to answer a question that
     /// only changes when Codex opens a NEW session. Doing that once a minute
     /// forever is the app's single largest idle cost.
     ///
-    /// Only the walk is cached. The file it found is re-read and re-parsed every
-    /// pass, so a session being written right now stays live at the full poll
-    /// cadence, and the snapshot age and reset countdowns keep counting. What
-    /// waits for the next walk is strictly the arrival of a brand-new session
-    /// file: up to `walkTTL` late, during which the previous session's numbers
-    /// keep showing with a visibly growing age.
-    private func newestSessionCached(now: Date) -> URL? {
-        if let c = cachedNewest, now.timeIntervalSince(c.at) < walkTTL,
-           FileManager.default.fileExists(atPath: c.url.path) {
-            return c.url
+    /// Only the walk is cached. The files it found are re-read and re-parsed
+    /// every pass (bar the known-barren ones), so a session being written right
+    /// now stays live at the full poll cadence, and the snapshot age and reset
+    /// countdowns keep counting. What waits for the next walk is strictly the
+    /// arrival of a brand-new session file: up to `walkTTL` late, during which
+    /// the previous session's numbers keep showing with a visibly growing age.
+    private func sessionsCached(now: Date) -> [URL] {
+        if let c = cachedSessions, now.timeIntervalSince(c.at) < walkTTL,
+           c.urls.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) {
+            return c.urls
         }
-        let found = Self.newestSession(dir: sessionsDir)
-        cachedNewest = found.map { (url: $0, at: now) }
+        let found = Self.newestSessions(dir: sessionsDir, limit: Self.fallbackDepth)
+        cachedSessions = found.isEmpty ? nil : (urls: found, at: now)
+        let kept = Set(found.map(\.path))
+        barren = barren.filter { kept.contains($0.key) }
         return found
+    }
+
+    static func stamp(_ url: URL) -> FileStamp? {
+        guard let a = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let m = a[.modificationDate] as? Date, let s = a[.size] as? NSNumber else { return nil }
+        return FileStamp(mtime: m, size: s.intValue)
     }
 
     // Read-only provider: switching is a cswap-only concept.
     public func switchTo(_ account: Account) throws {}
     public func switchToBest() throws {}
 
-    /// Newest `.jsonl` under the sessions tree, by file modification date.
-    static func newestSession(dir: String) -> URL? {
+    /// The `limit` newest `.jsonl` files under the sessions tree, newest first, by
+    /// file modification date.
+    static func newestSessions(dir: String, limit: Int) -> [URL] {
         let fm = FileManager.default
         guard let en = fm.enumerator(at: URL(fileURLWithPath: dir),
-                                     includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
-        var best: (url: URL, date: Date)?
+                                     includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        var all: [(url: URL, date: Date)] = []
         for case let u as URL in en where u.pathExtension == "jsonl" {
             let d = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-            if best == nil || d > best!.date { best = (u, d) }
+            all.append((u, d))
         }
-        return best?.url
+        return all.sorted { $0.date > $1.date }.prefix(limit).map(\.url)
     }
 
     /// Parse the latest usable snapshot for every rate-limit bucket in a

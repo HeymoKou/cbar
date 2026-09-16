@@ -118,6 +118,33 @@ assert(cxPct(cxCached) == 77, "a cached file that vanished forces a walk")
 try? FileManager.default.removeItem(atPath: cxDir)
 print("CODEX WALK CACHE OK")
 
+// A session Codex refused at the limit holds only a reason-only `premium` row.
+// It must not hide the last session that measured something — that reading is
+// the one that says why (2026-09-15: three refused sessions blanked the card).
+let cxFbDir = NSTemporaryDirectory() + "cbar-selftest-codex-fallback-\(getpid())"
+try! FileManager.default.createDirectory(atPath: cxFbDir, withIntermediateDirectories: true)
+func cxPut(_ name: String, _ content: String, mtime: Double) {
+    try! content.write(toFile: cxFbDir + "/" + name, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: mtime)],
+                                           ofItemAtPath: cxFbDir + "/" + name)
+}
+let codexRefused = #"{"timestamp":"2026-09-15T06:54:44.018Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"premium","limit_name":null,"primary":null,"secondary":null,"plan_type":null}}}"#
+cxPut("measured.jsonl", codexLine, mtime: 1_000)
+cxPut("refused-1.jsonl", codexRefused, mtime: 2_000)
+cxPut("refused-2.jsonl", codexRefused, mtime: 3_000)
+let cxFb = CodexProvider(sessionsDir: cxFbDir, walkTTL: 0)
+assert(cxPct(cxFb) == 5, "refused sessions fall back to the newest one with a measured window")
+assert(cxPct(cxFb) == 5, "a second pass, with the refused files remembered as barren, still finds it")
+// Remembered as barren only while unchanged: a live session that starts
+// measuring must take over, not stay written off.
+cxPut("refused-2.jsonl", codexRefused + "\n" + codexLine.replacingOccurrences(of: "\"used_percent\":5.0", with: "\"used_percent\":77.0"), mtime: 4_000)
+assert(cxPct(cxFb) == 77, "a barren session that gains a snapshot is read again")
+try! FileManager.default.removeItem(atPath: cxFbDir + "/measured.jsonl")
+cxPut("refused-2.jsonl", codexRefused, mtime: 5_000)
+assert((try! cxFb.accounts()).isEmpty, "no measured session anywhere → no card, not a made-up one")
+try? FileManager.default.removeItem(atPath: cxFbDir)
+print("CODEX FALLBACK OK")
+
 // A child that outlives its deadline gets killed; one that exits first does not.
 let hung = Process()
 hung.executableURL = URL(fileURLWithPath: "/bin/sleep")
