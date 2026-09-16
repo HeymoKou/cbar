@@ -2,6 +2,15 @@ import SwiftUI
 import AppKit
 import CbarCore
 
+/// SwiftUI's `State` property wrapper, under a name that cannot resolve to the
+/// `@State` MACRO. From the macOS 27 SDK the attribute `@State` picks the macro,
+/// which expands through `SwiftUIMacros` — a compiler plugin that ships with
+/// Xcode but not the Command Line Tools. On a CLT-only Mac, which is all the
+/// README asks for and what Homebrew builds with, every `@State` stopped
+/// compiling. The wrapper type is unchanged and still in the SDK; only the
+/// attribute lookup moved, so a typealias reaches it on every SDK.
+typealias ViewState = SwiftUI.State
+
 /// Button style with a hover wash + pressed state + pointer cursor.
 struct HoverButtonStyle: ButtonStyle {
     var compact = false
@@ -15,7 +24,7 @@ struct HoverButtonStyle: ButtonStyle {
         let configuration: ButtonStyleConfiguration
         let compact: Bool
         let font: Font?
-        @State private var hovering = false
+        @ViewState private var hovering = false
         var body: some View {
             configuration.label
                 .font(font ?? (compact ? .caption : .callout))
@@ -97,7 +106,7 @@ struct PopoverView: View {
         let usable = (NSScreen.main?.visibleFrame.height ?? 800) - chrome - 32
         return max(240, usable)
     }
-    @State private var listHeight: CGFloat = 0
+    @ViewState private var listHeight: CGFloat = 0
 
     /// cswap active first, then other cswap accounts, then Codex last.
     private var sortedAccounts: [Account] {
@@ -365,7 +374,7 @@ struct AccountCard: View {
     var isNextTarget = false
     let switchAction: () -> Void
     var removeAction: (() -> Void)? = nil
-    @State private var hovering = false
+    @ViewState private var hovering = false
 
     private var exhausted: Bool { acc.provider == "claude" && isExhausted(acc) }
     private var ground: Color { acc.isActive ? (stale ? Noct.cardStale : Noct.cardActive) : Noct.card }
