@@ -3,8 +3,8 @@
 A native macOS menu-bar monitor for your Claude accounts — 5h / 7d / Fable usage
 per account, a color-coded icon, and **automatic switching** between accounts.
 Pure Swift, no runtime dependencies: it talks to Claude's OAuth usage API
-directly and keeps credentials in the macOS Keychain. Codex usage is shown too,
-read from local session files.
+directly and keeps credentials in the macOS Keychain. Codex (ChatGPT) accounts
+can be tracked and switched too.
 
 **macOS 14+ only.** It uses the macOS Keychain and reads Claude Code's local
 config, so there is no Linux or Windows build.
@@ -24,7 +24,14 @@ Unofficial, unaffiliated, not from or endorsed by Anthropic.
   launch writes `~/.cbar/config.json` with both enabled and cbar starts rotating
   your live login on its own. Set them to `false` there, or don't install cbar.
 - **It writes your live credentials.** Switching rewrites the
-  `Claude Code-credentials` Keychain item and `~/.claude.json`.
+  `Claude Code-credentials` Keychain item and `~/.claude.json` — and, for Codex,
+  `~/.codex/auth.json`.
+- **Codex goes through undocumented OpenAI endpoints too:**
+  `chatgpt.com/backend-api/wham/usage` and `auth.openai.com/oauth/token`, with
+  the client ID the Codex CLI ships. Rotating accounts past a usage limit may
+  violate OpenAI's [Terms of Use](https://openai.com/policies/row-terms-of-use/),
+  which restrict circumventing rate limits. Codex auto-switch is **off** unless
+  you turn it on.
 
 That risk is yours. The MIT license covers cbar's own code; it grants no right to
 use Anthropic's service, OAuth client, or trademarks.
@@ -59,7 +66,8 @@ cbar switches away from the **active** account when either is true:
 It moves to the account with the most **5h** headroom. A target must be provably
 alive: status ok, a real 5h meter, data no older than the freshness window, 7d
 under the ceiling. An account needing re-login is never chosen no matter how much
-headroom its stale cache shows, and Codex is never a target. 120 s cooldown.
+headroom its stale cache shows. Codex accounts are never Claude targets; they
+have their own switch, below. 120 s cooldown.
 
 ## Pre-warm
 
@@ -72,6 +80,38 @@ of its own, it only re-points where your **own** traffic lands. Brief excursions
 onto a cold idle account to start its timer, then back to the burn account. It
 acts only while Claude Code is running. The 93% escape outranks it.
 
+## Codex
+
+Until you add a Codex account, cbar shows a read-only Codex card from
+`~/.codex/sessions`. Adding accounts turns that into one card per account, each
+polled for usage the way `/status` reads it.
+
+**Add Codex account** does one of two things:
+
+1. If the current Codex login isn't saved yet, it saves it.
+2. Otherwise it copies `CODEX_HOME="$HOME/.cbar/codex-login" codex login` to the
+   clipboard. Run it, log into the other account, and cbar picks it up on its
+   next poll.
+
+Don't log into a second account with plain `codex login`: it first **revokes**
+whatever login `~/.codex` holds, which kills the one cbar just saved. The one
+exception is re-logging the **active** account when its card says so — plain
+`codex login` is right there; any other account re-logs through **Add Codex
+account**.
+
+Click an account to switch. A switch rewrites `~/.codex/auth.json`, so it
+applies to the **next** `codex` you start; one that is already running keeps
+its account until restarted. cbar refuses to overwrite a login it hasn't saved,
+an API-key login, or a Codex set to keep credentials in the Keychain
+(`cli_auth_credentials_store` other than `file`), and it holds a switch while a
+running Codex is due to refresh its login.
+
+With `"codexAutoSwitchEnabled": true`, cbar switches away when the active
+account's switch window reaches `autoSwitchThreshold` — its **5h** window where
+the plan has one, otherwise its **weekly** one — or its week hits 99%. It moves
+to the least-used account that is fresh and healthy. No pre-warm: a running
+Codex never follows the switch, so there is no traffic to open a window with.
+
 ## Config
 
 `~/.cbar/config.json`, re-read every poll — no restart needed:
@@ -80,6 +120,7 @@ acts only while Claude Code is running. The 93% escape outranks it.
 {
   "autoSwitchEnabled": true,
   "autoSwitchThreshold": 93,
+  "codexAutoSwitchEnabled": false,
   "preWarmEnabled": true
 }
 ```
@@ -122,17 +163,18 @@ never touches your real Claude Code login.
 
 ```bash
 brew services stop heymokou/tap/cbar && brew uninstall heymokou/tap/cbar
-rm -rf ~/.cbar                                    # metadata, usage cache, log
-security delete-generic-password -s cbar          # once per stored account
+rm -rf ~/.cbar                                    # metadata, sealed Codex logins, caches, log
+security delete-generic-password -s cbar          # once per stored Claude account
+security delete-generic-password -s cbar-codex    # the Codex login key
 ```
 
 Non-Homebrew installs also need the launch agent gone
 (`launchctl unload ~/Library/LaunchAgents/com.heymo.cbar.plist`, then remove it
 and `~/Applications/Cbar.app`).
 
-Uninstalling does **not** restore your Claude Code login — whichever account cbar
-selected last stays active. Switch to the one you want first, or run `/login`
-afterwards.
+Uninstalling does **not** restore your Claude Code or Codex login — whichever
+account cbar selected last stays active. Switch to the one you want first, or
+run `/login` afterwards.
 
 ## Credits
 

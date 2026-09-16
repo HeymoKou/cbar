@@ -45,11 +45,22 @@ public enum SecureFile {
     /// when accounts change — so an upgrader could sit at the old mode forever,
     /// which is the exact population this is for. Rotated logs (`cbar.log.1`)
     /// have the same problem and hold the same content.
+    ///
+    /// Directories get 0700, not 0600: without the x bit even the owner can't
+    /// open what's inside. Harmless while `~/.cbar` held only files; the first
+    /// subdirectories (`codex/`, `codex-login/`) were locked out by this sweep on
+    /// every launch — sealed logins unreadable, a pending login unimportable.
     public static func tightenAll(dir: String) {
         try? ensureDir(dir)
         let fm = FileManager.default
         for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
-            tighten("\(dir)/\(name)")
+            let path = "\(dir)/\(name)"
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+            } else {
+                tighten(path)
+            }
         }
     }
 }

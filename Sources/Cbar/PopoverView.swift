@@ -127,6 +127,10 @@ struct PopoverView: View {
         guard store.config.autoSwitchEnabled else { return nil }
         return autoSwitchTarget(accounts: store.accounts, threshold: store.config.autoSwitchThreshold)
     }
+    private var nextCodexTarget: Int? {
+        guard store.config.codexAutoSwitchEnabled else { return nil }
+        return codexAutoSwitchTarget(accounts: store.accounts, threshold: store.config.autoSwitchThreshold)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -135,7 +139,10 @@ struct PopoverView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     if let error = store.lastError { errorBanner(error) }
-                    if claudeAccounts.isEmpty {
+                    if let notice = store.notice { noticeBanner(notice) }
+                    // Any stored account, not just Claude: someone tracking only
+                    // Codex accounts would otherwise never see them.
+                    if !store.accounts.contains(where: \.switchable) {
                         emptyState
                     } else {
                         ForEach(sortedAccounts) { acc in card(for: acc) }
@@ -164,20 +171,28 @@ struct PopoverView: View {
     /// Built statement by statement rather than inline in the `ForEach`: as one
     /// expression the argument list took the type-checker past its budget.
     private func card(for acc: Account) -> AccountCard {
-        let armed: Double? = store.config.autoSwitchEnabled ? store.config.autoSwitchThreshold : nil
-        let isNext = acc.provider == "claude" && acc.number == nextTarget
-        let canRemove = acc.provider == "claude" && !acc.isActive
-        // Claude only. Codex numbers are as old as the last Codex run and no poll
-        // can make them fresher, so "40 minutes old" is its resting state, not a
-        // fault — hatching it would cry wolf on every card, every time. Its age
-        // still shows in the card header, which is where it belongs.
-        let isStale = acc.provider == "claude" && (acc.ageSeconds ?? 0) > 600
+        let codex = acc.provider == "codex"
+        let cfg = store.config
+        let armed: Double? = (codex ? cfg.codexAutoSwitchEnabled : cfg.autoSwitchEnabled) ? cfg.autoSwitchThreshold : nil
+        let isNext = acc.number == (codex ? nextCodexTarget : nextTarget) && acc.switchable
+        let canRemove = acc.switchable && !acc.isActive
+        // Not the session-file Codex card: its numbers are as old as the last
+        // Codex run and no poll can make them fresher, so "40 minutes old" is its
+        // resting state, not a fault — hatching it would cry wolf every time. Its
+        // age still shows in the card header. Stored Codex accounts ARE polled, so
+        // for them an old reading is a real fault, same as Claude's.
+        let isStale = acc.switchable && (acc.ageSeconds ?? 0) > 600
+        // Manual switches take the same viability gate as the automatic one, minus
+        // the threshold: a click may pick a busy account, not a dead one.
+        let canSwitch = codex ? codexIsSwitchTarget(acc, threshold: 100) : isSwitchTarget(acc)
         return AccountCard(acc: acc,
                            stale: isStale,
                            threshold: armed,
+                           switchMeter: codex ? (codexSwitchMeter(acc)?.id ?? "5h") : "5h",
                            isNextTarget: isNext,
+                           canSwitch: canSwitch,
                            switchAction: { store.switchTo(acc) },
-                           removeAction: canRemove ? { store.remove(acc.number) } : nil)
+                           removeAction: canRemove ? { store.remove(acc) } : nil)
     }
 
     // MARK: header
@@ -264,6 +279,30 @@ struct PopoverView: View {
         }
     }
 
+    /// What the last click did, when that is an instruction rather than a failure
+    /// — above all the Codex login command, which has to stay readable until it
+    /// has been run. Dismissed by hand for that reason, not by the next poll.
+    private func noticeBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(Noct.accentText)
+            Text(message)
+                .font(.system(size: 10))
+                .lineSpacing(3)
+                .foregroundStyle(Noct.ink2)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { store.dismissNotice() } label: { Image(systemName: "xmark").font(.system(size: 10)) }
+                .buttonStyle(HoverButtonStyle(compact: true))
+                .foregroundStyle(Noct.ink5)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Noct.accentFill))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Noct.accentLine, lineWidth: 1))
+    }
+
     /// Nothing tracked yet. The dashed outline says "this is where accounts will
     /// be", which an empty solid card does not.
     private var emptyState: some View {
@@ -322,13 +361,19 @@ struct PopoverView: View {
                 .foregroundStyle(Noct.ink3)
             }
             HStack {
-                Button { store.importCswap() } label: {
-                    Label("Import from cswap", systemImage: "square.and.arrow.down")
+                Button { store.addCodexAccount() } label: {
+                    Label("Add Codex account", systemImage: "plus.circle")
                 }
                 .foregroundStyle(Noct.ink3)
-                .disabled(!store.canImportCswap)
-                .opacity(store.canImportCswap ? 1 : 0.45)
                 Spacer()
+                // Only when there is something to import: a permanently greyed
+                // button here was taking the row the Codex button needs.
+                if store.canImportCswap {
+                    Button { store.importCswap() } label: {
+                        Label("Import from cswap", systemImage: "square.and.arrow.down")
+                    }
+                    .foregroundStyle(Noct.ink3)
+                }
                 Button { NSApp.terminate(nil) } label: { Text("Quit") }
                     .foregroundStyle(Noct.ink3)
             }
@@ -369,14 +414,21 @@ struct PopoverView: View {
 struct AccountCard: View {
     let acc: Account
     var stale = false
-    /// Auto-switch threshold when it is armed, drawn on the active account's 5h.
+    /// Auto-switch threshold when it is armed, drawn on the active account's
+    /// switch window.
     var threshold: Double? = nil
+    /// The meter that threshold acts on: 5h for Claude; for Codex the 5h window
+    /// where the plan has one, else the weekly.
+    var switchMeter = "5h"
     var isNextTarget = false
+    /// Whether the Switch button may show — decided by the panel, because the
+    /// gate differs per provider.
+    var canSwitch = false
     let switchAction: () -> Void
     var removeAction: (() -> Void)? = nil
     @ViewState private var hovering = false
 
-    private var exhausted: Bool { acc.provider == "claude" && isExhausted(acc) }
+    private var exhausted: Bool { acc.switchable && isExhausted(acc) }
     private var ground: Color { acc.isActive ? (stale ? Noct.cardStale : Noct.cardActive) : Noct.card }
     private var border: Color {
         if acc.status == "needs-reauth" { return Noct.crit.opacity(0.35) }
@@ -389,7 +441,7 @@ struct AccountCard: View {
     /// this line costs the email its last characters and says nothing the footer
     /// doesn't already say.
     private var ageText: String? {
-        guard stale || acc.provider == "codex", let a = acc.ageSeconds, a > 90 else { return nil }
+        guard stale || (acc.provider == "codex" && !acc.switchable), let a = acc.ageSeconds, a > 90 else { return nil }
         if a >= 3600 { return "cached \(Int(a / 3600))h ago" }
         return "cached \(Int(a / 60))m ago"
     }
@@ -457,7 +509,11 @@ struct AccountCard: View {
     /// past the card's clip bounds and got sliced off (2026-08-27).
     @ViewBuilder private var statusNote: some View {
         if acc.meters.isEmpty {
-            Text(acc.status == "needs-reauth" ? "Re-login needed (run Claude Code login)"
+            Text(acc.status == "needs-reauth"
+                 ? (acc.provider != "codex" ? "Re-login needed (run Claude Code login)"
+                    // The live account re-logs in where it lives; any other one
+                    // through the inbox, so `codex login` can't revoke the live one.
+                    : acc.isActive ? "Re-login needed (run codex login)" : "Re-login needed (Add Codex account)")
                  : acc.status == "ok" ? "no data yet" : acc.status)
                 .font(.system(size: 10))
                 .foregroundStyle(Noct.ink5)
@@ -481,7 +537,7 @@ struct AccountCard: View {
                 // clicking it wrote a dead token straight into the live keychain,
                 // bypassing the auto-switch gate entirely. Remove (✕) stays
                 // available: getting rid of a dead slot is the point.
-                if isSwitchTarget(acc) {
+                if canSwitch {
                     Button("Switch", action: switchAction)
                         .buttonStyle(HoverButtonStyle(compact: true, font: .system(size: 11)))
                         .foregroundStyle(Noct.accentText)
@@ -511,7 +567,7 @@ struct AccountCard: View {
                           // A non-active account's numbers stay neutral: hue on
                           // every card at once would make none of them the subject.
                           numberColor: acc.isActive ? Metric.number(for: m.id) : Noct.ink2,
-                          threshold: m.id == "5h" && acc.isActive ? threshold : nil,
+                          threshold: m.id == switchMeter && acc.isActive ? threshold : nil,
                           stale: stale)
                 .frame(maxWidth: .infinity)
             }
@@ -523,10 +579,10 @@ struct AccountCard: View {
     /// metric is about to cause a switch, why this account is the destination,
     /// how old the reading is, then the plain reset countdown.
     private func caption(for m: Meter) -> String? {
-        if m.id == "5h", acc.isActive, let t = threshold, m.pct >= t {
+        if m.id == switchMeter, acc.isActive, let t = threshold, m.pct >= t {
             return "over thr. \(Int(t))%"
         }
-        if m.id == "5h", isNextTarget, !acc.isActive { return "most headroom" }
+        if m.id == switchMeter, isNextTarget, !acc.isActive { return "most headroom" }
         // The reset countdown outranks the reading's age, including when the
         // reading is stale. How old the number is already appears in the card
         // header and in the hatched fill; when the window resets appears nowhere
@@ -541,8 +597,8 @@ struct AccountCard: View {
 
     private func captionColor(for m: Meter) -> Color? {
         if stale { return nil }
-        if m.id == "5h", acc.isActive, let t = threshold, m.pct >= t { return Noct.critText }
-        if m.id == "5h", isNextTarget, !acc.isActive { return Metric.number(for: "5h") }
+        if m.id == switchMeter, acc.isActive, let t = threshold, m.pct >= t { return Noct.critText }
+        if m.id == switchMeter, isNextTarget, !acc.isActive { return Metric.number(for: "5h") }
         return nil
     }
 }

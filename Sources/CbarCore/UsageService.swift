@@ -317,7 +317,7 @@ public final class UsageService: Provider {
         pgrepMatches(["-x", "claude"]) || pgrepMatches(["-f", "@anthropic-ai/claude-code"])
     }
 
-    private static func pgrepMatches(_ args: [String]) -> Bool {
+    static func pgrepMatches(_ args: [String]) -> Bool {
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         p.arguments = args
         p.standardOutput = Pipe(); p.standardError = Pipe()
@@ -330,7 +330,7 @@ public final class UsageService: Provider {
             // lets cbar rotate a token Claude Code may still be holding — the
             // false negative this whole check exists to avoid. Assume running:
             // the cost is a deferred refresh, not a revoked token family.
-            CbarLog.write("pgrep \(args.joined(separator: " ")) timed out — assuming Claude Code IS running")
+            CbarLog.write("pgrep \(args.joined(separator: " ")) timed out — assuming it IS running")
             return true
         }
         return p.terminationStatus == 0

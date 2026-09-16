@@ -33,8 +33,30 @@ public enum Keychain {
     public static func set(service: String, account: String, value: String) throws {
         let b64 = Data(value.utf8).base64EncodedString()   // no line wrapping
         let cmd = "add-generic-password -U -a \"\(account)\" -s \"\(service)\" -w \(b64)\n"
+        try checkLine(cmd, service: service)
         let (rc, _, err) = run(["-i"], stdin: cmd)
-        if rc != 0 { throw KErr.failed(rc, "set \(service): \(err)") }
+        if rc != 0 { throw KErr.failed(rc, "set \(service): \(writeFailure(rc, err))") }
+    }
+
+    /// `security -i` reads each command into a 4096-byte buffer, newline
+    /// included (measured on macOS 27: a 4096-byte line stores, 4097 does not).
+    /// A longer line is not rejected — it is CUT: the first 4096 bytes run as a
+    /// command and store a truncated secret, and the rest runs as a second,
+    /// "unknown" command that `security` echoes, secret and all, to stderr. A
+    /// 4 KB Codex `auth.json` did both on its first real write (2026-09-16).
+    /// Refuse before anything reaches `security`.
+    static let maxLine = 4096
+    static func checkLine(_ cmd: String, service: String) throws {
+        guard cmd.utf8.count <= maxLine else {
+            throw KErr.failed(-4, "set \(service): value too large for security -i (\(cmd.utf8.count) > \(maxLine) bytes)")
+        }
+    }
+
+    /// What a failed write may say. Never `security`'s stderr: for a write it can
+    /// quote the command line back, and the command line carries the secret.
+    /// The exit code is enough to diagnose; the timeout message is cbar's own.
+    static func writeFailure(_ rc: Int32, _ err: String) -> String {
+        rc == -3 ? err : "security exited \(rc)"
     }
 
     /// Write a value VERBATIM (no base64) — for the live Claude Code item,
@@ -51,8 +73,9 @@ public enum Keychain {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let cmd = "add-generic-password -U -a \"\(account)\" -s \"\(service)\" -w \"\(esc)\"\n"
+        try checkLine(cmd, service: service)
         let (rc, _, err) = run(["-i"], stdin: cmd)
-        if rc != 0 { throw KErr.failed(rc, "setRaw \(service): \(err)") }
+        if rc != 0 { throw KErr.failed(rc, "setRaw \(service): \(writeFailure(rc, err))") }
     }
 
     public static func delete(service: String, account: String) throws {

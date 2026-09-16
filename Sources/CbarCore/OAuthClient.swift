@@ -91,7 +91,7 @@ public struct OAuthClient {
         return (access, now_ms + expiresIn * 1000, o["refresh_token"] as? String, scope)
     }
 
-    private func send(_ req: URLRequest) throws -> (Data, Int, Double?) {
+    func send(_ req: URLRequest) throws -> (Data, Int, Double?) {
         var outData: Data?; var status = 0; var retryAfter: Double?; var netErr = false
         let sem = DispatchSemaphore(value: 0)
         URLSession.shared.dataTask(with: req) { d, resp, e in

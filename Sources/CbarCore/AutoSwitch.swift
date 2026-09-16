@@ -23,6 +23,14 @@ public struct CbarConfig {
     /// running, so an idle machine is never churned.
     public var preWarmEnabled: Bool = true
 
+    /// OFF by default, unlike the two above. Those rewrite a login the user
+    /// installed cbar to manage; this one rewrites `~/.codex/auth.json`, and an
+    /// upgrade that started doing that to someone who only ever added Claude
+    /// accounts would be a switch nobody asked for. It shares
+    /// `autoSwitchThreshold`, applied to each account's own switch window (see
+    /// `codexSwitchMeter`).
+    public var codexAutoSwitchEnabled: Bool = false
+
     /// Defaults, for holding a value before the first poll has read the file.
     public init() {}
 
@@ -45,6 +53,7 @@ public struct CbarConfig {
             "autoSwitchEnabled": d.autoSwitchEnabled,
             "autoSwitchThreshold": d.autoSwitchThreshold,
             "preWarmEnabled": d.preWarmEnabled,
+            "codexAutoSwitchEnabled": d.codexAutoSwitchEnabled,
         ]
         guard let json = try? JSONSerialization.data(withJSONObject: o,
                                                      options: [.prettyPrinted, .sortedKeys]),
@@ -64,8 +73,49 @@ public struct CbarConfig {
             c.autoSwitchThreshold = t
         }
         if let p = o["preWarmEnabled"] as? Bool { c.preWarmEnabled = p }
+        if let x = o["codexAutoSwitchEnabled"] as? Bool { c.codexAutoSwitchEnabled = x }
         return c
     }
+}
+
+// MARK: Codex
+
+/// The window a Codex account is switched on: 5h where its plan has one, the
+/// weekly window where it doesn't. prolite has only the weekly one, so the
+/// Claude rule (5h or nothing) would never move off it and never pick it.
+public func codexSwitchMeter(_ a: Account) -> Meter? {
+    a.meters.first { $0.id == "5h" } ?? a.meters.first { $0.id == "7d" }
+}
+
+/// Whether cbar may point Codex at this slot: a stored, fresh, healthy login
+/// whose switch window is under `threshold` and whose week isn't spent. Same
+/// gates as `isSwitchTarget`, for the same reasons, with the window swapped.
+public func codexIsSwitchTarget(_ a: Account, threshold: Double, maxAge: Double = 600) -> Bool {
+    guard a.provider == "codex", a.switchable, a.status == "ok",
+          (a.ageSeconds ?? .infinity) <= maxAge, let m = codexSwitchMeter(a) else { return false }
+    return m.pct < threshold && !isExhausted(a)
+}
+
+/// How spent an account is across its duration windows. Ranks targets across
+/// plans whose switch windows differ in length: a 3% 5h window on a 90% week is
+/// not more headroom than half a week left.
+func codexLoad(_ a: Account) -> Double {
+    a.meters.filter { $0.id == "5h" || $0.id == "7d" }.map(\.pct).max() ?? 100
+}
+
+/// The Codex slot to switch to, or nil: the active slot's switch window reached
+/// `threshold` (or its week is exhausted) and a viable slot exists. Least spent
+/// wins, lowest number on a tie.
+///
+/// No pre-warm counterpart, on purpose. A running Codex process never follows a
+/// change to `auth.json`, so an excursion onto an idle account opens nothing —
+/// the traffic stays where it was.
+public func codexAutoSwitchTarget(accounts: [Account], threshold: Double) -> Int? {
+    let codex = accounts.filter { $0.provider == "codex" && $0.switchable }
+    guard let active = codex.first(where: { $0.isActive }), let m = codexSwitchMeter(active),
+          m.pct >= threshold || isExhausted(active) else { return nil }
+    return codex.filter { !$0.isActive && codexIsSwitchTarget($0, threshold: threshold) }
+        .min { (codexLoad($0), $0.number) < (codexLoad($1), $1.number) }?.number
 }
 
 /// Whether cbar should keep polling behind a SLEEPING display.

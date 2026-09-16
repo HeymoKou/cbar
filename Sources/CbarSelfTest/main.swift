@@ -182,6 +182,26 @@ try! Keychain.setRaw(service: ks, account: "plain", value: pj)
 assert(try! Keychain.getRaw(service: ks, account: "plain") == pj, "raw roundtrip incl. quotes/spaces/backslash")
 assert(try! Keychain.get(service: ks, account: "plain") == pj, "get tolerates plain (CC-written) values")
 try! Keychain.delete(service: ks, account: "plain")
+// `security -i` CUTS a line past 4096 bytes: the head stores a truncated secret,
+// the tail comes back on stderr as an "unknown command", secret included. An
+// oversized write must fail before `security` sees it, leave no item, and say
+// nothing about the value (2026-09-16: a 4 KB Codex login did all three).
+let kBig = String(repeating: "s3cr3t", count: 700)   // 4.2 KB, 5.6 KB as base64
+var kBigErr = ""
+do { try Keychain.set(service: ks, account: "big", value: kBig) } catch { kBigErr = "\(error)" }
+assert(kBigErr.contains("too large"), "oversized write refused: \(kBigErr.prefix(120))")
+assert(!kBigErr.contains("s3cr3t") && !kBigErr.contains(Data(kBig.utf8).base64EncodedString().prefix(40)),
+       "the refusal never quotes the value")
+let kBigStored = try? Keychain.get(service: ks, account: "big")
+assert(kBigStored == .some(nil), "no truncated item left behind")
+var kBigRawErr = ""
+do { try Keychain.setRaw(service: ks, account: "big", value: kBig) } catch { kBigRawErr = "\(error)" }
+assert(kBigRawErr.contains("too large"), "setRaw has the same guard")
+// The largest line that fits still round-trips.
+let kEdgeValue = String(repeating: "a", count: 3000)   // base64 4000 + command ≈ 4063 bytes
+try! Keychain.set(service: ks, account: "edge", value: kEdgeValue)
+assert(try! Keychain.get(service: ks, account: "edge") == kEdgeValue, "a value just under the limit round-trips intact")
+try! Keychain.delete(service: ks, account: "edge")
 print("KEYCHAIN OK")
 
 // Credentials parse/serialize round-trip
@@ -322,6 +342,15 @@ FileManager.default.createFile(atPath: stale, contents: Data("{}".utf8),
                                attributes: [.posixPermissions: 0o644])
 SecureFile.tightenAll(dir: secDir)
 assert(mode(stale) == 0o600, "startup sweep tightens files nothing rewrites")
+// …and must not do that to a DIRECTORY: 0600 drops the x bit and locks the owner
+// out of everything inside (codex/ and codex-login/ lost on every launch).
+let secSub = secDir + "/codex"
+try FileManager.default.createDirectory(atPath: secSub, withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o755])
+FileManager.default.createFile(atPath: secSub + "/1.sealed", contents: Data("x".utf8))
+SecureFile.tightenAll(dir: secDir)
+assert(mode(secSub) == 0o700, "startup sweep gives a subdirectory 0700, got \(mode(secSub).map { String($0, radix: 8) } ?? "nil")")
+assert((try? Data(contentsOf: URL(fileURLWithPath: secSub + "/1.sealed"))) != nil, "files inside stay readable")
 try? FileManager.default.removeItem(atPath: NSTemporaryDirectory() + "cbar-sec-\(getpid())")
 print("SECUREFILE OK")
 
@@ -677,6 +706,407 @@ _ = pollsWhileDark(autoSwitchEnabled: true, preWarmEnabled: false, claudeCodeRun
 assert(probeCalls == 1, "armed evaluates the running check exactly once, got \(probeCalls)")
 print("POLLS WHILE DARK OK")
 
+// ---- Codex accounts: login file, store, switch, refresh guard, service -------
+// Everything here runs on fake JWTs, temp dirs and throwaway Keychain services —
+// never `~/.codex` or the `cbar-codex` items.
+let cxNow = 2_000_000_000.0   // 2033-05-18T03:33:20Z
+func cxJWT(_ claims: [String: Any]) -> String {
+    let b64 = (try! JSONSerialization.data(withJSONObject: claims)).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return "eyJhbGciOiJub25lIn0.\(b64).sig"
+}
+func cxAccessJWT(user: String, account: String, plan: String, exp: Double, iat: Double? = nil, tag: String) -> String {
+    // Real Codex JWTs run ~1.8 KB each, which is what broke the first storage
+    // design (a Keychain line limit); tokens this size keep that tested.
+    cxJWT(["exp": Int(exp), "iat": Int(iat ?? exp - 864_000), "jti": tag, "sub": "sub-\(user)",
+           "pad": String(repeating: "p", count: 1400),
+           "https://api.openai.com/auth": ["chatgpt_account_id": account, "chatgpt_user_id": user, "chatgpt_plan_type": plan]])
+}
+func cxAuth(user: String, account: String, email: String, plan: String, exp: Double, iat: Double? = nil,
+            tag: String, tokenAccount: String? = nil, extra: [String: Any] = [:]) -> Data {
+    var o: [String: Any] = [
+        "auth_mode": "chatgpt", "OPENAI_API_KEY": NSNull(),
+        "tokens": ["id_token": cxJWT(["email": email, "pad": String(repeating: "p", count: 1400)]),
+                   "access_token": cxAccessJWT(user: user, account: account, plan: plan, exp: exp, iat: iat, tag: tag),
+                   "refresh_token": "rt-\(tag)", "account_id": tokenAccount ?? account],
+        "last_refresh": "2026-09-11T02:16:20.537098Z",
+    ]
+    extra.forEach { o[$0.key] = $0.value }
+    return try! JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted])
+}
+// Hoisted out of every assert below: these attempt real writes, and `assert` is
+// compiled out in release.
+func cxThrows(_ body: () throws -> Void) -> Bool {
+    do { try body(); return false } catch { return true }
+}
+let cxAPIKeyFile = Data(#"{"OPENAI_API_KEY":"sk-x","tokens":null}"#.utf8)
+
+let cxA = CodexLogin(raw: cxAuth(user: "user-a", account: "acct-team", email: "a@x.com", plan: "team",
+                                 exp: cxNow + 86_400, tag: "a1", extra: ["future_field": "kept"]))!
+assert(cxA.accountId == "acct-team" && cxA.userId == "user-a" && cxA.email == "a@x.com" && cxA.plan == "team",
+       "identity, email and plan come out of the tokens")
+assert(cxA.identity == "user-a|acct-team")
+assert(cxA.raw.count > 4096, "fixture is real-sized (\(cxA.raw.count) bytes)")
+assert(!cxA.isExpired(now: cxNow) && cxA.isExpired(now: cxNow + 86_400 - 200), "expiry uses Codex's 5-minute window")
+assert(CodexLogin(raw: cxAPIKeyFile) == nil, "an API-key login is not a token login")
+assert(CodexLogin(raw: Data(#"{"tokens":{"access_to"#.utf8)) == nil, "a half-written auth.json is not a login")
+// Same Team workspace, different person: one account id, two identities.
+let cxTeammate = CodexLogin(raw: cxAuth(user: "user-b", account: "acct-team", email: "b@x.com", plan: "team",
+                                        exp: cxNow + 86_400, tag: "b1"))!
+assert(cxTeammate.identity != cxA.identity, "a shared workspace account id does not make two people one login")
+// Mixed: B's account_id around A's tokens — what Codex's persist_tokens leaves
+// when a switch lands inside its refresh. Neither half may be trusted.
+assert(CodexLogin(raw: cxAuth(user: "user-a", account: "acct-team", email: "a@x.com", plan: "team",
+                              exp: cxNow + 86_400, tag: "mx", tokenAccount: "acct-pro")) == nil,
+       "a file whose account_id disagrees with its access token is rejected")
+// No chatgpt_user_id claim: fall back to `sub`, never to an empty user.
+let cxNoUserClaims = cxJWT(["exp": Int(cxNow + 86_400), "sub": "sub-z",
+                            "https://api.openai.com/auth": ["chatgpt_account_id": "acct-z"]])
+let cxNoUser = CodexLogin(raw: try! JSONSerialization.data(withJSONObject: [
+    "tokens": ["access_token": cxNoUserClaims, "refresh_token": "rt-z", "account_id": "acct-z"]]))
+assert(cxNoUser?.identity == "sub-z|acct-z", "identity falls back to sub: \(cxNoUser?.identity ?? "nil")")
+
+// A refresh replaces only the tokens that came back, like Codex's persist_tokens.
+let cxRefreshedAccess = cxAccessJWT(user: "user-a", account: "acct-team", plan: "team", exp: cxNow + 864_000, iat: cxNow, tag: "a2")
+let cxA2 = cxA.refreshed(idToken: nil, accessToken: cxRefreshedAccess, refreshToken: "rt-a2",
+                         now: Date(timeIntervalSince1970: cxNow))!
+assert(cxA2.refreshToken == "rt-a2" && cxA2.accessToken == cxRefreshedAccess && cxA2.identity == cxA.identity)
+assert(cxA2.email == "a@x.com", "id token kept when the response carries none")
+assert(cxA2.issuedAt == cxNow && (cxA.issuedAt ?? 0) < cxNow, "iat orders two copies of one login")
+let cxA2Obj = try! JSONSerialization.jsonObject(with: cxA2.raw) as! [String: Any]
+assert(cxA2Obj["future_field"] as? String == "kept", "auth.json keys cbar doesn't model survive a refresh")
+assert((cxA2Obj["last_refresh"] as? String)?.hasPrefix("2033-05-18T03:33:20") == true, "last_refresh stamped")
+
+// config.toml: only a TOP-LEVEL cli_auth_credentials_store counts.
+let cxHome = NSTemporaryDirectory() + "cbar-selftest-codexhome-\(getpid())"
+try! FileManager.default.createDirectory(atPath: cxHome, withIntermediateDirectories: true)
+func cxToml(_ s: String) { try! s.write(toFile: cxHome + "/config.toml", atomically: true, encoding: .utf8) }
+assert(CodexLive.credentialsStore(home: cxHome) == nil, "no config.toml → default (file)")
+cxToml("model = \"x\"\ncli_auth_credentials_store = \"keyring\" # why not\n[projects.\"/a\"]\ntrust_level = \"trusted\"\n")
+assert(CodexLive.credentialsStore(home: cxHome) == "keyring")
+cxToml("[projects.\"/a\"]\ncli_auth_credentials_store = \"keyring\"\n")
+assert(CodexLive.credentialsStore(home: cxHome) == nil, "a key inside a table is not the setting")
+cxToml("cli_auth_credentials_store = \"file\"\r\nmodel = \"x\"\r\n")
+assert(CodexLive.credentialsStore(home: cxHome) == "file", "CRLF line endings")
+cxToml("cli_auth_credentials_store_v2 = \"keyring\"\n")
+assert(CodexLive.credentialsStore(home: cxHome) == nil, "a longer key name is a different key")
+cxToml("xs = [\n  [1, 2],\n]\ncli_auth_credentials_store = \"keyring\"\n")
+assert(CodexLive.credentialsStore(home: cxHome) == "keyring", "an array row starting with [ is not a table header")
+try! FileManager.default.removeItem(atPath: cxHome + "/config.toml")
+
+// Live file states.
+let cxAuthPath = cxHome + "/auth.json"
+if case .missing = CodexLive.read(home: cxHome) {} else { assertionFailure("no auth.json → missing") }
+try! cxAPIKeyFile.write(to: URL(fileURLWithPath: cxAuthPath))
+if case .notTokenLogin = CodexLive.read(home: cxHome) {} else { assertionFailure("API-key auth.json → notTokenLogin") }
+try! Data(#"{"tokens":{"access_to"#.utf8).write(to: URL(fileURLWithPath: cxAuthPath))
+if case .unusable = CodexLive.read(home: cxHome) {} else { assertionFailure("half-written auth.json → unusable") }
+
+// Store: add, dedup by identity, sealed round-trip, numbering, remove.
+let cxStoreDir = NSTemporaryDirectory() + "cbar-selftest-codexstore-\(getpid())"
+let cxSvc = "cbar-selftest-codex-\(getpid())"
+let cxStore = CodexAccountStore(dir: cxStoreDir, keychainService: cxSvc)
+let cxB = CodexLogin(raw: cxAuth(user: "user-a", account: "acct-pro", email: "a@x.com", plan: "prolite",
+                                 exp: cxNow + 86_400, tag: "p1"))!
+let cxN1 = try cxStore.add(cxA)
+let cxN2 = try cxStore.add(cxB)
+assert(cxN1 == 1 && cxN2 == 2 && cxStore.list().count == 2, "two identities, two slots")
+let cxN1Again = try cxStore.add(cxA2)
+assert(cxN1Again == cxN1 && cxStore.list().count == 2, "re-capturing a login lands in its own slot")
+let cxStoredA = try cxStore.login(cxN1)
+assert(cxStoredA?.raw == cxA2.raw, "the stored login is the file verbatim")
+assert(cxStore.slot(for: cxA) == cxN1 && cxStore.slot(for: cxTeammate) == nil)
+assert(cxStore.list().first { $0.number == cxN2 }?.plan == "prolite")
+// Sealed on disk, key in the Keychain: a fresh store instance (the next launch)
+// opens what this one sealed, and the file itself holds no token text.
+let cxReopened = try CodexAccountStore(dir: cxStoreDir, keychainService: cxSvc).login(cxN1)
+assert(cxReopened?.raw == cxA2.raw, "another store instance opens the sealed login")
+let cxSealedPath = cxStoreDir + "/codex/\(cxN1).sealed"
+let cxSealedBytes = try Data(contentsOf: URL(fileURLWithPath: cxSealedPath))
+assert(cxSealedBytes.range(of: Data("rt-a2".utf8)) == nil && cxSealedBytes.range(of: Data("acct-team".utf8)) == nil,
+       "no token or identity in the sealed file")
+let cxSealedMode = (try! FileManager.default.attributesOfItem(atPath: cxSealedPath)[.posixPermissions] as! NSNumber).intValue
+assert(cxSealedMode == 0o600, "sealed login is owner-only")
+// A sealed login that exists but can't be read is an error, not an empty slot.
+try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: cxSealedPath)
+let cxUnreadable = cxThrows { _ = try CodexAccountStore(dir: cxStoreDir, keychainService: cxSvc).login(cxN1) }
+try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cxSealedPath)
+assert(cxUnreadable, "an unreadable sealed login throws instead of reading as 'no login'")
+
+// Switcher. The outgoing login goes back into ITS slot before the file changes.
+var cxCodexUp = false
+let cxSwitcher = CodexSwitcher(store: cxStore, home: cxHome, codexRunning: { cxCodexUp })
+let cxALive = CodexLogin(raw: cxAuth(user: "user-a", account: "acct-team", email: "a@x.com", plan: "team",
+                                     exp: cxNow + 900_000, iat: cxNow + 36_000, tag: "a9"))!   // Codex refreshed since capture
+try! cxALive.raw.write(to: URL(fileURLWithPath: cxAuthPath))
+try cxSwitcher.switchTo(cxN2, now: cxNow)
+let cxBackedUp = try cxStore.login(cxN1)
+assert(cxBackedUp?.refreshToken == "rt-a9", "outgoing slot backed up with the live, newer tokens")
+assert((try! Data(contentsOf: URL(fileURLWithPath: cxAuthPath))) == cxB.raw, "live auth.json is now B, byte for byte")
+let cxMode = (try! FileManager.default.attributesOfItem(atPath: cxAuthPath)[.posixPermissions] as! NSNumber).intValue
+assert(cxMode == 0o600, "auth.json written owner-only, got \(String(cxMode, radix: 8))")
+assert((try! FileManager.default.contentsOfDirectory(atPath: cxHome)).allSatisfy { !$0.contains(".cbar-") }, "no temp file left")
+try cxSwitcher.switchTo(cxN2, now: cxNow)   // already live: a no-op, not a self-backup loop
+// A running Codex due to refresh could write its rotated tokens into the file
+// cbar just switched in — so while one might be mid-refresh, wait.
+try! cxALive.raw.write(to: URL(fileURLWithPath: cxAuthPath))
+cxCodexUp = true
+let cxDeferred = cxThrows { try cxSwitcher.switchTo(cxN2, now: cxNow + 900_000 - 200) }
+assert(cxDeferred, "live login due for refresh + Codex running → switch deferred")
+assert((try! Data(contentsOf: URL(fileURLWithPath: cxAuthPath))) == cxALive.raw, "…and the file untouched")
+cxCodexUp = false
+try cxSwitcher.switchTo(cxN2, now: cxNow + 900_000 - 200)
+assert((try! Data(contentsOf: URL(fileURLWithPath: cxAuthPath))) == cxB.raw, "no Codex running → nothing can be mid-refresh, switch")
+// A login cbar never saved is never overwritten — it could not be put back.
+try! cxTeammate.raw.write(to: URL(fileURLWithPath: cxAuthPath))
+let cxRefusedUnmanaged = cxThrows { try cxSwitcher.switchTo(cxN1, now: cxNow) }
+assert(cxRefusedUnmanaged, "unmanaged live login refuses the switch")
+assert((try! Data(contentsOf: URL(fileURLWithPath: cxAuthPath))) == cxTeammate.raw, "…and leaves it untouched")
+// Neither is an API-key file, nor a mixed one.
+try! cxAPIKeyFile.write(to: URL(fileURLWithPath: cxAuthPath))
+let cxRefusedAPIKey = cxThrows { try cxSwitcher.switchTo(cxN1, now: cxNow) }
+assert(cxRefusedAPIKey, "API-key auth.json refuses the switch")
+try! cxAuth(user: "user-a", account: "acct-team", email: "a@x.com", plan: "team", exp: cxNow + 86_400,
+            tag: "mx", tokenAccount: "acct-pro").write(to: URL(fileURLWithPath: cxAuthPath))
+let cxRefusedMixed = cxThrows { try cxSwitcher.switchTo(cxN1, now: cxNow) }
+assert(cxRefusedMixed, "mixed auth.json refuses the switch")
+// Logged out: nothing to lose, so write.
+try! FileManager.default.removeItem(atPath: cxAuthPath)
+try cxSwitcher.switchTo(cxN1, now: cxNow)
+let cxWritten = CodexLogin(raw: try Data(contentsOf: URL(fileURLWithPath: cxAuthPath)))
+assert(cxWritten?.identity == cxA.identity, "logged out → switch writes")
+// Keyring-backed Codex: rewriting auth.json would switch nothing.
+cxToml("cli_auth_credentials_store = \"auto\"\n")
+let cxRefusedKeyring = cxThrows { try cxSwitcher.switchTo(cxN2, now: cxNow) }
+assert(cxRefusedKeyring, "non-file credential store refuses the switch")
+try! FileManager.default.removeItem(atPath: cxHome + "/config.toml")
+
+// Refresh guard: cbar refreshes only a token nothing else can hold.
+let cxLiveA: CodexLive.State = .login(cxA2)
+assert(CodexUsageService.shouldSkipRefresh(n: 1, liveSlot: 1, live: cxLiveA, slotRefresh: "rt-a2"), "live slot: Codex's to refresh")
+assert(!CodexUsageService.shouldSkipRefresh(n: 2, liveSlot: 1, live: cxLiveA, slotRefresh: "rt-p1"), "idle slot: cbar's")
+assert(CodexUsageService.shouldSkipRefresh(n: 2, liveSlot: nil, live: cxLiveA, slotRefresh: "rt-a2"), "same refresh token as live, whatever the slot")
+assert(CodexUsageService.shouldSkipRefresh(n: 2, liveSlot: nil, live: .unusable, slotRefresh: "rt-p1"), "unusable live file: wait")
+assert(!CodexUsageService.shouldSkipRefresh(n: 2, liveSlot: nil, live: .notTokenLogin, slotRefresh: "rt-p1"), "API-key live login holds none of cbar's tokens")
+assert(!CodexUsageService.shouldSkipRefresh(n: 2, liveSlot: nil, live: .missing, slotRefresh: "rt-p1"), "logged out: nobody holds it")
+assert(CodexClient.isTerminalRefreshFailure(status: 401, body: ""))
+assert(CodexClient.isTerminalRefreshFailure(status: 400, body: #"{"error":"invalid_grant"}"#))
+assert(CodexClient.isTerminalRefreshFailure(status: 400, body: #"{"error":{"code":"refresh_token_reused"}}"#))
+assert(!CodexClient.isTerminalRefreshFailure(status: 500, body: "upstream"), "a 5xx backs off, it doesn't demand a login")
+
+// Inbox: `codex login` must find its CODEX_HOME, and must find it EMPTY.
+let cxInbox = CodexLoginInbox(dir: NSTemporaryDirectory() + "cbar-selftest-codexinbox-\(getpid())", home: cxHome)
+let cxPreparedEmpty = try cxInbox.prepare(importingInto: cxStore)
+assert(cxPreparedEmpty == nil)
+var cxIsDir: ObjCBool = false
+assert(FileManager.default.fileExists(atPath: cxInbox.dir, isDirectory: &cxIsDir) && cxIsDir.boolValue, "prepare creates the directory")
+assert(cxInbox.command.contains("CODEX_HOME=") && cxInbox.command.hasSuffix("codex login"))
+try! Data(#"{"tokens":{"access_to"#.utf8).write(to: URL(fileURLWithPath: cxInbox.dir + "/auth.json"))
+let cxHalf = try cxInbox.importIfPresent(into: cxStore)
+assert(cxHalf == nil, "still being written → wait")
+let cxC = CodexLogin(raw: cxAuth(user: "user-c", account: "acct-plus", email: "c@x.com", plan: "plus",
+                                 exp: cxNow + 86_400, tag: "c1"))!
+try! cxC.raw.write(to: URL(fileURLWithPath: cxInbox.dir + "/auth.json"))
+try! Data("x".utf8).write(to: URL(fileURLWithPath: cxInbox.dir + "/installation_id"))
+// A startup sweep from an older build may have locked the inbox; prepare must
+// still import what's in it rather than clear it unread.
+try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cxInbox.dir)
+let cxN3 = try cxInbox.prepare(importingInto: cxStore)
+assert(cxN3 == 3 && cxStore.slot(for: cxC) == 3, "a login left in the inbox is imported before it is cleared")
+assert((try! FileManager.default.contentsOfDirectory(atPath: cxInbox.dir)).isEmpty, "inbox emptied, directory kept")
+// Re-login to the LIVE account through the inbox replaces the live file too —
+// importing only into the slot was undone by the same poll's heal.
+let cxAReLogin = CodexLogin(raw: cxAuth(user: "user-a", account: "acct-team", email: "a@x.com", plan: "team",
+                                        exp: cxNow + 1_000_000, iat: cxNow + 100_000, tag: "a-relogin"))!
+try! cxAReLogin.raw.write(to: URL(fileURLWithPath: cxInbox.dir + "/auth.json"))
+let cxRelogged = try cxInbox.importIfPresent(into: cxStore)
+assert(cxRelogged == cxN1, "re-login lands in the account's slot")
+let cxLiveAfterRelogin = CodexLogin(raw: try Data(contentsOf: URL(fileURLWithPath: cxAuthPath)))
+assert(cxLiveAfterRelogin?.refreshToken == "rt-a-relogin", "…and replaces the live login it re-logged")
+
+// Numbers are never reused: a removed slot's cached usage must not dress up
+// the next account.
+try cxStore.remove(cxN3!)
+let cxD = CodexLogin(raw: cxAuth(user: "user-d", account: "acct-d", email: "d@x.com", plan: "plus",
+                                 exp: cxNow + 86_400, tag: "d1"))!
+let cxN4 = try cxStore.add(cxD)
+assert(cxN4 == 4, "slot number after removing #3 is 4, got \(cxN4)")
+
+for n in [cxN1, cxN2, cxN4] { try cxStore.remove(n) }
+let cxGone = try cxStore.login(cxN1)
+assert(cxStore.list().isEmpty && cxGone == nil, "removed")
+// A sealed login whose key is gone says so, instead of reading as "no login";
+// a malformed key is never silently replaced.
+try cxStore.setLogin(9, cxA)
+try Keychain.set(service: cxSvc, account: CodexAccountStore.keyAccount, value: "not-a-key")
+let cxBadKey = cxThrows { try CodexAccountStore(dir: cxStoreDir, keychainService: cxSvc).setLogin(10, cxA) }
+assert(cxBadKey, "a malformed key item stops writes instead of being replaced")
+try? Keychain.delete(service: cxSvc, account: CodexAccountStore.keyAccount)
+let cxKeyless = cxThrows { _ = try CodexAccountStore(dir: cxStoreDir, keychainService: cxSvc).login(9) }
+assert(cxKeyless, "a login that can't be opened throws")
+for p in [cxHome, cxStoreDir, cxInbox.dir] { try? FileManager.default.removeItem(atPath: p) }
+print("CODEX ACCOUNTS OK")
+
+// CodexUsageService against a fake API: the token rules end to end.
+final class FakeCodexAPI: CodexAPI {
+    var fetched: [String] = []          // access tokens used, in order
+    var refreshedWith: [String] = []
+    var usage = Data(#"{"rate_limit":{"primary_window":{"used_percent":40,"limit_window_seconds":604800,"reset_at":2000090000}}}"#.utf8)
+    var fetchError: Error?
+    var refreshError: Error?
+    var refreshResult: (id: String?, access: String?, refresh: String?) = (nil, nil, nil)
+    func fetchUsageRaw(_ login: CodexLogin) throws -> Data {
+        fetched.append(login.accessToken)
+        if let e = fetchError { throw e }
+        return usage
+    }
+    func refresh(refreshToken: String) throws -> (id: String?, access: String?, refresh: String?) {
+        refreshedWith.append(refreshToken)
+        if let e = refreshError { throw e }
+        return refreshResult
+    }
+}
+let svcRoot = NSTemporaryDirectory() + "cbar-selftest-codexsvc-\(getpid())"
+let svcKC = "cbar-selftest-codexsvc-\(getpid())"
+func svcFixture(_ name: String) -> (CodexAccountStore, String, String) {
+    let dir = svcRoot + "/" + name, home = dir + "/home"
+    try! FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+    return (CodexAccountStore(dir: dir, keychainService: svcKC), home, dir + "/cache.json")
+}
+func svcLogin(_ tag: String, account: String, exp: Double, iat: Double? = nil) -> CodexLogin {
+    CodexLogin(raw: cxAuth(user: "user-s", account: account, email: "\(account)@x.com", plan: "plus",
+                           exp: exp, iat: iat, tag: tag))!
+}
+
+// 1. The live slot's token expired while Codex sat unused. Skipping it must not
+//    block the other slots: pass one skips it, pass two fetches the idle slot.
+do {
+    let (st, home, cache) = svcFixture("skip")
+    let live = svcLogin("L", account: "acct-live", exp: cxNow - 100)
+    let idle = svcLogin("I", account: "acct-idle", exp: cxNow + 86_400)
+    _ = try st.add(live); _ = try st.add(idle)
+    try! live.raw.write(to: URL(fileURLWithPath: home + "/auth.json"))
+    let api = FakeCodexAPI()
+    let svc = CodexUsageService(store: st, client: api, cachePath: cache, home: home)
+    let p1 = svc.accounts(now: cxNow)
+    assert(api.fetched.isEmpty && p1.first { $0.isActive }?.number == 1, "pass 1: live slot chosen, expired, skipped")
+    let p2 = svc.accounts(now: cxNow + 60)
+    assert(api.fetched == [idle.accessToken], "pass 2 fetches the idle slot instead of re-skipping the live one: \(api.fetched.count)")
+    assert(p2.first { $0.number == 2 }?.status == "ok", "idle slot reads ok")
+    assert(api.refreshedWith.isEmpty, "the live slot's token is never refreshed by cbar")
+}
+// 2. An idle slot's expired token: refreshed, persisted BEFORE use, then used.
+do {
+    let (st, home, cache) = svcFixture("refresh")
+    let idle = svcLogin("I", account: "acct-idle", exp: cxNow - 100)
+    _ = try st.add(idle)
+    try! svcLogin("X", account: "acct-other", exp: cxNow + 86_400).raw.write(to: URL(fileURLWithPath: home + "/auth.json"))
+    let api = FakeCodexAPI()
+    let newAccess = cxAccessJWT(user: "user-s", account: "acct-idle", plan: "plus", exp: cxNow + 864_000, iat: cxNow, tag: "I2")
+    api.refreshResult = (nil, newAccess, "rt-I2")
+    let svc = CodexUsageService(store: st, client: api, cachePath: cache, home: home)
+    let p = svc.accounts(now: cxNow)
+    assert(api.refreshedWith == ["rt-I"], "idle expired token refreshed once")
+    let persisted = try st.login(1)
+    assert(persisted?.refreshToken == "rt-I2" && persisted?.accessToken == newAccess, "rotation persisted")
+    assert(api.fetched == [newAccess], "fetch uses the refreshed token")
+    assert(p.first?.status == "ok")
+}
+// 3. A dead refresh token → needs re-login, meters cleared.
+do {
+    let (st, home, cache) = svcFixture("dead")
+    _ = try st.add(svcLogin("I", account: "acct-idle", exp: cxNow - 100))
+    let api = FakeCodexAPI(); api.refreshError = OAuthError.needsReauth
+    let p = CodexUsageService(store: st, client: api, cachePath: cache, home: home).accounts(now: cxNow)
+    assert(p.first?.status == "needs-reauth" && p.first?.meters.isEmpty == true, "revoked refresh → needs-reauth")
+}
+// 4. A 401 on the usage fetch → needs re-login.
+do {
+    let (st, home, cache) = svcFixture("401")
+    _ = try st.add(svcLogin("I", account: "acct-idle", exp: cxNow + 86_400))
+    let api = FakeCodexAPI(); api.fetchError = OAuthError.http(401, retryAfter: nil)
+    let p = CodexUsageService(store: st, client: api, cachePath: cache, home: home).accounts(now: cxNow)
+    assert(p.first?.status == "needs-reauth", "401 → needs-reauth")
+}
+// 5. Heal copies a NEWER live login into its slot, never an older one over a
+//    newer slot (a re-login imported through the inbox).
+do {
+    let (st, home, cache) = svcFixture("heal")
+    _ = try st.add(svcLogin("old", account: "acct-live", exp: cxNow + 86_400, iat: cxNow - 1_000))
+    let rotated = svcLogin("rot", account: "acct-live", exp: cxNow + 90_000, iat: cxNow)
+    try! rotated.raw.write(to: URL(fileURLWithPath: home + "/auth.json"))
+    let svc = CodexUsageService(store: st, client: FakeCodexAPI(), cachePath: cache, home: home)
+    _ = svc.accounts(now: cxNow)
+    let healed = try st.login(1)
+    assert(healed?.refreshToken == "rt-rot", "newer live login healed into its slot")
+    try st.setLogin(1, svcLogin("fresh", account: "acct-live", exp: cxNow + 100_000, iat: cxNow + 500))
+    _ = svc.accounts(now: cxNow + 60)
+    let kept = try st.login(1)
+    assert(kept?.refreshToken == "rt-fresh", "an older live file never overwrites a newer slot")
+}
+// 6. A mixed live file blocks refreshing even an unrelated idle slot.
+do {
+    let (st, home, cache) = svcFixture("mixed")
+    _ = try st.add(svcLogin("I", account: "acct-idle", exp: cxNow - 100))
+    try! cxAuth(user: "user-s", account: "acct-a", email: "", plan: "plus", exp: cxNow + 86_400,
+                tag: "mx", tokenAccount: "acct-b").write(to: URL(fileURLWithPath: home + "/auth.json"))
+    let api = FakeCodexAPI()
+    _ = CodexUsageService(store: st, client: api, cachePath: cache, home: home).accounts(now: cxNow)
+    assert(api.refreshedWith.isEmpty, "unusable live file → no refresh anywhere")
+}
+try? Keychain.delete(service: svcKC, account: CodexAccountStore.keyAccount)
+try? FileManager.default.removeItem(atPath: svcRoot)
+print("CODEX SERVICE OK")
+
+// wham/usage → meters. Shapes taken from a real response (prolite at its limit,
+// 2026-09-16), identifiers dropped.
+let cxProlite = #"{"plan_type":"prolite","rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_after_seconds":247179,"reset_at":2000247179},"secondary_window":null},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":2000018000},"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":2000604800}}}]}"#
+let cxProMeters = try CodexUsageMapper.meters(from: Data(cxProlite.utf8), now: cxNow)
+assert(cxProMeters.map(\.id) == ["7d"], "weekly-only plan → one 7d meter, unused Spark hidden: \(cxProMeters.map(\.id))")
+assert(cxProMeters[0].pct == 100 && cxProMeters[0].countdown == "2d 20h")
+assert(CodexUsageMapper.soonestReset(from: Data(cxProlite.utf8)) == 2000018000, "soonest reset spans every window")
+let cxTeamUsage = #"{"rate_limit":{"primary_window":{"used_percent":42.5,"limit_window_seconds":18000,"reset_at":2000003600},"secondary_window":{"used_percent":61,"limit_window_seconds":604800,"reset_at":2000090000}},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":{"used_percent":12,"limit_window_seconds":18000,"reset_at":2000007200},"secondary_window":null}}]}"#
+let cxTeamMeters = try CodexUsageMapper.meters(from: Data(cxTeamUsage.utf8), now: cxNow)
+assert(cxTeamMeters.map(\.id) == ["5h", "7d", "Spark"], "5h + week, and a model allowance once it's in use: \(cxTeamMeters.map(\.id))")
+assert(cxTeamMeters[0].pct == 42.5 && cxTeamMeters[0].countdown == "1h 0m")
+let cxTwoSparks = #"{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":604800}},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":{"used_percent":5,"limit_window_seconds":18000}}},{"limit_name":"GPT-6-Spark","rate_limit":{"primary_window":{"used_percent":7,"limit_window_seconds":18000}}}]}"#
+let cxSparkIds = try CodexUsageMapper.meters(from: Data(cxTwoSparks.utf8), now: cxNow).map(\.id)
+assert(Set(cxSparkIds).count == cxSparkIds.count, "meter ids stay unique when short names collide: \(cxSparkIds)")
+let cxBadJSON = cxThrows { _ = try CodexUsageMapper.meters(from: Data("<html>".utf8)) }
+assert(cxBadJSON, "a non-JSON body is badResponse, not zero meters")
+print("CODEX USAGE MAP OK")
+
+// Codex auto-switch targets. The switch window is 5h where the plan has one,
+// else the week — the Claude rule would never move off a weekly-only account.
+func cxAcc(_ n: Int, _ active: Bool, _ meters: [(String, Double)], status: String = "ok", age: Double = 30) -> Account {
+    Account(id: "codex:\(n)", number: n, email: "c\(n)", org: "", isActive: active, status: status,
+            meters: meters.map { Meter(id: $0.0, pct: $0.1, countdown: nil) }, ageSeconds: age, provider: "codex")
+}
+assert(codexAutoSwitchTarget(accounts: [cxAcc(1, true, [("7d", 100)]), cxAcc(2, false, [("5h", 10), ("7d", 40)])],
+                             threshold: 93) == 2, "weekly-only account at its limit moves to one with room")
+assert(codexAutoSwitchTarget(accounts: [cxAcc(1, true, [("7d", 50)]), cxAcc(2, false, [("7d", 0)])],
+                             threshold: 93) == nil, "under threshold → stay")
+assert(codexAutoSwitchTarget(accounts: [cxAcc(1, true, [("5h", 95), ("7d", 20)]), cxAcc(2, false, [("7d", 10)])],
+                             threshold: 93) == 2, "a 5h plan switches on its 5h window")
+assert(codexAutoSwitchTarget(accounts: [cxAcc(1, true, [("5h", 10), ("7d", 99)]), cxAcc(2, false, [("7d", 10)])],
+                             threshold: 93) == 2, "an exhausted week forces the move even with an empty 5h")
+let cxBusy = cxAcc(1, true, [("7d", 100)])
+assert(codexAutoSwitchTarget(accounts: [cxBusy, cxAcc(2, false, [("7d", 10)], age: 700)], threshold: 93) == nil, "stale target")
+assert(codexAutoSwitchTarget(accounts: [cxBusy, cxAcc(2, false, [("7d", 10)], status: "needs-reauth")], threshold: 93) == nil, "dead target")
+assert(codexAutoSwitchTarget(accounts: [cxBusy, cxAcc(2, false, [("5h", 5), ("7d", 99)])], threshold: 93) == nil, "exhausted week is never a target")
+assert(codexAutoSwitchTarget(accounts: [cxBusy, cxAcc(2, false, [("7d", 95)])], threshold: 93) == nil, "a target already over threshold would bounce back")
+assert(codexAutoSwitchTarget(accounts: [cxBusy, cxAcc(0, false, [("7d", 0)])], threshold: 93) == nil, "the session-file card is not an account")
+assert(codexAutoSwitchTarget(accounts: [cxAcc(1, true, [("5h", 95)]), cxAcc(2, false, [("5h", 3), ("7d", 90)]), cxAcc(3, false, [("7d", 50)])],
+                             threshold: 93) == 3, "least spent across windows wins, not the emptiest 5h")
+assert(codexAutoSwitchTarget(accounts: [mkAcc(1, true, 99, provider: "claude"), cxAcc(2, false, [("7d", 0)])], threshold: 93) == nil,
+       "a Claude account at its limit never moves Codex")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 99), cxAcc(2, false, [("5h", 0), ("7d", 0)])], threshold: 93) == nil,
+       "…and a Codex slot is never a Claude target")
+assert(codexIsSwitchTarget(cxAcc(2, false, [("7d", 96)]), threshold: 100), "a manual switch may pick a busy account")
+assert(!codexIsSwitchTarget(cxAcc(2, false, [("7d", 99.5)]), threshold: 100), "…but not a spent week")
+print("CODEX AUTOSWITCH OK")
+
 // ---- CbarConfig: defaults + first-run seeding -------------------------------
 // The bug this covers (2026-09-01): no config file was ever written and both
 // flags defaulted off, so cbar watched an account hit its limit and never
@@ -715,6 +1145,11 @@ let edited = CbarConfig.load(dir: cfgDir)
 assert(!edited.autoSwitchEnabled, "explicit false survives seeding")
 assert(edited.autoSwitchThreshold == 80, "explicit threshold survives seeding")
 assert(edited.preWarmEnabled, "key absent from an edited file keeps the default")
+assert(!CbarConfig().codexAutoSwitchEnabled, "Codex auto-switch defaults OFF")
+assert(!seeded.codexAutoSwitchEnabled, "seeded file carries codexAutoSwitchEnabled: false, visibly")
+assert(!edited.codexAutoSwitchEnabled, "absent from an existing config → stays off on upgrade")
+try! Data("{\"codexAutoSwitchEnabled\":true}".utf8).write(to: URL(fileURLWithPath: seededPath))
+assert(CbarConfig.load(dir: cfgDir).codexAutoSwitchEnabled, "codexAutoSwitchEnabled: true is honored")
 print("CONFIG DEFAULTS + SEED OK")
 
 if CommandLine.arguments.contains("--live") {

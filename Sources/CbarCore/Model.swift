@@ -10,7 +10,7 @@ public struct Meter: Identifiable, Sendable, Codable {
 }
 
 public struct Account: Identifiable, Sendable {
-    public let id: String          // "cswap:2" | "codex"
+    public let id: String          // "claude:2" | "codex:1" | "codex" (session-file card)
     public let number: Int
     public let email: String
     public let org: String
@@ -18,9 +18,11 @@ public struct Account: Identifiable, Sendable {
     public let status: String      // "ok" | other
     public let meters: [Meter]
     public let ageSeconds: Double?
-    public let provider: String    // "cswap" | "codex"
+    public let provider: String    // "claude" | "codex"
     public var maxPct: Double { meters.map(\.pct).max() ?? 0 }
-    public var switchable: Bool { provider != "codex" }
+    /// Codex is switchable only as a stored slot (number ≥ 1). Number 0 is the
+    /// read-only card built from session files, which belongs to no account.
+    public var switchable: Bool { provider != "codex" || number > 0 }
     public init(id: String, number: Int, email: String, org: String,
                 isActive: Bool, status: String, meters: [Meter], ageSeconds: Double?,
                 provider: String = "cswap") {

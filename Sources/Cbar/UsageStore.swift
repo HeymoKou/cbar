@@ -6,6 +6,10 @@ import CbarCore
 final class UsageStore {
     private(set) var accounts: [Account] = []
     private(set) var lastError: String?
+    /// A non-error message from the last user action — the Codex login command
+    /// that was just copied, or the account that was just added. Cleared by the
+    /// next action, not the next poll: it carries an instruction to follow.
+    private(set) var notice: String?
     private(set) var lastUpdated: Date?
     /// Last config the poll read. Published so the header can show the armed
     /// threshold and the plots can draw it — no extra file read, this is the
@@ -17,7 +21,15 @@ final class UsageStore {
     private let store = AccountStore()
     private let usage: UsageService
     private let switcher: Switcher
+    /// Session-file Codex card, shown only until a Codex account is stored.
     private let codex = CodexProvider()
+    private let codexStore = CodexAccountStore()
+    private let codexUsage: CodexUsageService
+    private let codexSwitcher: CodexSwitcher
+    private let codexInbox = CodexLoginInbox()
+    /// Separate from Claude's: the two rewrite different logins, and one
+    /// provider's switch must not hold the other's escape in cooldown.
+    private var lastCodexSwitchAt: Date?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private let interval: TimeInterval = 60   // pacing gates the actual network hits
@@ -59,6 +71,8 @@ final class UsageStore {
     init() {
         usage = UsageService(store: store)
         switcher = Switcher(store: store)
+        codexUsage = CodexUsageService(store: codexStore)
+        codexSwitcher = CodexSwitcher(store: codexStore)
     }
 
     /// True when there are no accounts yet but a cswap backup exists to import.
@@ -162,11 +176,22 @@ final class UsageStore {
             guard let self else { return }
             var accs: [Account] = []
             var err: String? = carrying
+            var added: String?
             do { accs = try self.usage.accounts() } catch { err = err ?? "\(error)" }
-            accs += (try? self.codex.accounts()) ?? []
+            // A login finished in the inbox since the last pass (see `addCodexAccount`).
+            do {
+                if let n = try self.codexInbox.importIfPresent(into: self.codexStore) {
+                    self.codexUsage.clearFailureState(n)
+                    let email = self.codexStore.list().first { $0.number == n }?.email ?? "#\(n)"
+                    added = "Codex account \(email) added"
+                    CbarLog.write("codex account #\(n) \(email) imported from login inbox")
+                }
+            } catch { err = err ?? "import Codex login: \(error)" }
+            accs += self.codexStore.list().isEmpty ? ((try? self.codex.accounts()) ?? []) : self.codexUsage.accounts()
             DispatchQueue.main.async {
                 self.accounts = accs
                 self.lastError = err
+                if let added { self.notice = added }
                 self.lastUpdated = Date()
                 self.onUpdate?()
                 self.maybeAutoSwitch()
@@ -179,6 +204,8 @@ final class UsageStore {
     private func maybeAutoSwitch() {
         let cfg = CbarConfig.load()
         config = cfg          // publish before the guard: the header shows it either way
+        // Before Claude's guard: Codex has its own switch, independent of Claude's two.
+        if cfg.codexAutoSwitchEnabled { maybeAutoSwitchCodex(threshold: cfg.autoSwitchThreshold) }
         guard cfg.autoSwitchEnabled || cfg.preWarmEnabled else { return }
         // Observability: log the active account's switch-usage + decision each poll,
         // so it's visible in Console why auto-switch does or doesn't fire.
@@ -229,7 +256,43 @@ final class UsageStore {
         }
     }
 
+    /// Codex's escape: the active slot's switch window hit the threshold. Lands on
+    /// the next `codex` started — a running one keeps its account — so there is
+    /// nothing to gain from switching faster than the cooldown.
+    private func maybeAutoSwitchCodex(threshold: Double) {
+        guard let target = codexAutoSwitchTarget(accounts: accounts, threshold: threshold) else { return }
+        if let last = lastCodexSwitchAt, Date().timeIntervalSince(last) < autoSwitchCooldown {
+            CbarLog.write("codex auto-switch WANTED → #\(target) but in cooldown")
+            return
+        }
+        let active = accounts.first { $0.provider == "codex" && $0.isActive }
+        let pct = active.flatMap(codexSwitchMeter).map { "\($0.id)=\(Int($0.pct))%" } ?? "?"
+        lastCodexSwitchAt = Date()
+        CbarLog.write("codex auto-switch triggered #\(active?.number ?? 0) (\(pct)) → #\(target)")
+        work.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.codexSwitcher.switchTo(target)
+                CbarLog.write("codex auto-switch OK → #\(target) (new codex sessions only)")
+            } catch {
+                CbarLog.write("codex auto-switch FAILED → #\(target): \(error) (retry after cooldown)")
+            }
+            self.refresh()
+        }
+    }
+
     func switchTo(_ account: Account) {
+        if account.provider == "codex" {
+            lastCodexSwitchAt = Date()
+            mutate("switch Codex to #\(account.number)") { [weak self, codexSwitcher] in
+                try codexSwitcher.switchTo(account.number)
+                CbarLog.write("codex manual switch → #\(account.number)")
+                DispatchQueue.main.async {
+                    self?.notice = "Codex switched to \(account.email) — applies to the next codex you start"
+                }
+            }
+            return
+        }
         // Arm the shared cooldown so the next poll's auto-switch/pre-warm doesn't
         // reverse a hand-picked account a second later — the auto path only wrote
         // this timestamp itself, so a manual switch used to be fair game to undo.
@@ -245,6 +308,8 @@ final class UsageStore {
         switchTo(best)
     }
 
+    func dismissNotice() { notice = nil }
+
     func addCurrent() {
         // Clear the slot's stale failure state after capturing fresh creds — this
         // IS the "fix a dead slot" path, and its backoff/needs-reauth must not
@@ -255,8 +320,40 @@ final class UsageStore {
         }
     }
 
-    func remove(_ number: Int) {
-        mutate("remove #\(number)") { [store] in try store.remove(number) }
+    func remove(_ account: Account) {
+        if account.provider == "codex" {
+            mutate("remove Codex #\(account.number)") { [codexStore, codexUsage] in
+                try codexStore.remove(account.number)
+                codexUsage.forget(account.number)
+            }
+        } else {
+            mutate("remove #\(account.number)") { [store] in try store.remove(account.number) }
+        }
+    }
+
+    /// One button, two steps. While the live Codex login is one cbar hasn't saved,
+    /// save it. Once it has, the next account has to be logged into somewhere
+    /// OTHER than `~/.codex` — `codex login` there would revoke the one just
+    /// saved — so hand over the inbox command and import on a later poll.
+    func addCodexAccount() {
+        mutate("add Codex account") { [weak self, codexStore, codexInbox, codexUsage] in
+            if let mode = CodexLive.credentialsStore(), mode != "file" {
+                throw CodexSwitcher.SwitchErr.unsupportedStore(mode)
+            }
+            if case .login(let live) = CodexLive.read(), codexStore.slot(for: live) == nil {
+                let n = try codexStore.add(live)
+                codexUsage.clearFailureState(n)
+                DispatchQueue.main.async { self?.notice = "Saved current Codex login (\(live.email ?? "#\(n)")). Click again to add another." }
+                return
+            }
+            try codexInbox.prepare(importingInto: codexStore)
+            let cmd = codexInbox.command
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(cmd, forType: .string)
+                self?.notice = "Copied — run in Terminal, log in, cbar picks it up: \(cmd)"
+            }
+        }
     }
 
     func importCswap() {
