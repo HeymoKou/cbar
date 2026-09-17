@@ -1,5 +1,4 @@
 import AppKit
-import CbarCore
 
 /// Owns the menu-bar status item and a custom borderless panel that is placed
 /// at an ABSOLUTE screen position derived from the status item's frame — top
@@ -22,7 +21,7 @@ final class StatusItemController: NSObject {
         super.init()
         item.button?.target = self
         item.button?.action = #selector(toggle)
-        render(overall: .healthy, stale: false, tooltip: "cbar")
+        render(tooltip: "cbar")
     }
 
     /// Attach the SwiftUI-hosting content (created after init to break the
@@ -95,15 +94,13 @@ final class StatusItemController: NSObject {
         return p
     }
 
-    func render(overall: Health, stale: Bool, tooltip: String) {
-        var color = overall.nsColor
-        if stale { color = color.withAlphaComponent(0.5) }
+    func render(tooltip: String) {
+        // Template: system paints it white on a dark menu bar, black on light.
         let cfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-            .applying(.init(paletteColors: [color]))
-        let img = NSImage(systemSymbolName: "arrow.left.arrow.right.circle.fill",
+        let img = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
                           accessibilityDescription: "cbar")?
             .withSymbolConfiguration(cfg)
-        img?.isTemplate = false
+        img?.isTemplate = true
         item.button?.image = img
         item.button?.toolTip = tooltip
     }

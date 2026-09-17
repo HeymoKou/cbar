@@ -207,14 +207,10 @@ struct PopoverView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            // Mirrors the menu-bar icon, including its dim-when-stale, so the thing
-            // you clicked and the thing that opened are visibly the same object.
-            Circle()
-                .fill(activeHealth(claudeAccounts).color.opacity(stale ? 0.5 : 1))
-                .frame(width: 18, height: 18)
-                .overlay(Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Noct.panelBottom))
+            // Same circular-swap mark as the menu-bar template extra.
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Noct.ink)
             Text("cbar").font(.system(size: 16, weight: .medium)).foregroundStyle(Noct.ink)
             Rectangle().fill(Noct.hairline).frame(width: 1, height: 12)
             Text(stale ? "data \(store.cacheAgeShort) old"

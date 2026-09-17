@@ -15,20 +15,6 @@ private func dynamic(light: Int, dark: Int) -> Color {
     })
 }
 
-/// Status color for the MENU-BAR ICON only (green/orange/red). Deliberately kept
-/// off the popover bars, which are colored by metric instead (see `Metric`).
-extension Health {
-    var rgb: (r: Double, g: Double, b: Double) {
-        switch self {
-        case .healthy: return (0x34 / 255.0, 0xA8 / 255.0, 0x53 / 255.0)  // Google green, not neon
-        case .warn:    return (0.90, 0.52, 0.05)
-        case .crit:    return (0.86, 0.18, 0.16)
-        }
-    }
-    var nsColor: NSColor { NSColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1) }
-    var color: Color { Color(.sRGB, red: rgb.r, green: rgb.g, blue: rgb.b) }
-}
-
 /// Nocturne — the design system the popover is drawn from.
 ///
 /// Nocturne publishes DARK values only. The light appearance is derived here, and

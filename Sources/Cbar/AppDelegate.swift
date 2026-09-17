@@ -16,16 +16,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusCtl.onPopoverOpen = { [weak self] in self?.store.refresh() }
         store.onUpdate = { [weak self] in
             guard let self else { return }
-            // Icon color reflects the ACTIVE account only (its remaining quota),
-            // so a maxed non-active account doesn't redden the icon.
-            let claudeAccts = self.store.accounts.filter { $0.provider == "claude" }
-            let overall = activeHealth(claudeAccts)
-            let stale = activeStale(claudeAccts)
-            let active = claudeAccts.first(where: \.isActive)
+            let active = self.store.accounts.first { $0.provider == "claude" && $0.isActive }
             let tip = self.store.lastError
                 ?? active.map { "\($0.email) · \(Int($0.maxPct.rounded()))%" }
                 ?? "cbar"
-            self.statusCtl.render(overall: overall, stale: stale, tooltip: tip)
+            self.statusCtl.render(tooltip: tip)
         }
         store.start()
     }
