@@ -71,6 +71,7 @@ assert(cx!.meters.count == 2)
 assert(Int(cx!.meters[0].pct) == 5 && cx!.meters[0].id == "5h")
 assert(Int(cx!.meters[1].pct) == 12 && cx!.meters[1].id == "7d")
 assert(cx!.meters[0].countdown == "1h 0m", "5h countdown: \(cx!.meters[0].countdown ?? "nil")")
+assert(cx!.meters[0].resetsAt == 2000003600, "session-file meters keep absolute reset")
 assert(cx!.org == "OpenAI · team")
 // Codex's post-2026-07-13 shape: one WEEKLY window in `primary`, `secondary`
 // null. Labelled by position this read as "5h", four times smaller than the

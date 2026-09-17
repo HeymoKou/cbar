@@ -358,7 +358,13 @@ final class UsageStore {
             DispatchQueue.main.async {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(cmd, forType: .string)
-                self?.notice = "Copied — run in Terminal, log in, cbar picks it up: \(cmd)"
+                self?.notice = """
+                Copied. Add another Codex account:
+                1. Paste in Terminal (not plain `codex login` — that revokes the saved one):
+                \(cmd)
+                2. Log into the other ChatGPT account
+                3. Click Refresh — cbar imports it
+                """
             }
         }
     }

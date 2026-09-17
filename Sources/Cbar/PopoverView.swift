@@ -568,17 +568,18 @@ struct AccountCard: View {
         return id
     }
 
-    /// Reset remaining first — that is why the row exists. Switch notes outrank
-    /// it only when this meter is the reason a click or auto-switch is about to
-    /// fire. Prefer `resetsAt` so the string is not a snapshot from fetch time.
+    /// Reset remaining first — that is why the row exists. Switch notes used to
+    /// replace it on the active switch window, which hid the countdown on a full
+    /// Codex week (prolite at 100% showed "over 93%" and nothing about when it
+    /// comes back). Prefer `resetsAt` so the string is not a snapshot from fetch.
     private func caption(for m: Meter) -> String? {
+        let remain = CodexProvider.countdown(m.resetsAt, now: Date().timeIntervalSince1970)
+            ?? m.countdown
+        if let c = remain { return "reset in \(c)" }
         if m.id == switchMeter, acc.isActive, let t = threshold, m.pct >= t {
             return "over \(Int(t))%"
         }
         if m.id == switchMeter, isNextTarget, !acc.isActive { return "most headroom" }
-        let remain = CodexProvider.countdown(m.resetsAt, now: Date().timeIntervalSince1970)
-            ?? m.countdown
-        if let c = remain { return "reset in \(c)" }
         if m.pct >= 99 { return "exhausted" }
         if stale, let a = acc.ageSeconds { return "as of \(Int(a / 60))m ago" }
         return nil

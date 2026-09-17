@@ -86,18 +86,21 @@ Until you add a Codex account, cbar shows a read-only Codex card from
 `~/.codex/sessions`. Adding accounts turns that into one card per account, each
 polled for usage the way `/status` reads it.
 
-**Add Codex account** does one of two things:
+**Add another Codex account** — footer **Codex** button, in this order:
 
-1. If the current Codex login isn't saved yet, it saves it.
-2. Otherwise it copies `CODEX_HOME="$HOME/.cbar/codex-login" codex login` to the
-   clipboard. Run it, log into the other account, and cbar picks it up on its
-   next poll.
+1. Click **Codex**. If the current login isn't saved yet, that click saves it
+   and the banner says so. Click **Codex** again.
+2. cbar copies `CODEX_HOME="$HOME/.cbar/codex-login" codex login` to the
+   clipboard (the banner shows the command).
+3. Paste and run **that** command in Terminal — **not** plain `codex login`.
+4. Log into the other ChatGPT account in the browser it opens.
+5. Click the refresh icon (or wait up to 60s). The new card appears.
 
 Don't log into a second account with plain `codex login`: it first **revokes**
 whatever login `~/.codex` holds, which kills the one cbar just saved. The one
 exception is re-logging the **active** account when its card says so — plain
-`codex login` is right there; any other account re-logs through **Add Codex
-account**.
+`codex login` is right there; any other account re-logs through the footer
+**Codex** button.
 
 Click an account to switch. A switch rewrites `~/.codex/auth.json`, so it
 applies to the **next** `codex` you start; one that is already running keeps
