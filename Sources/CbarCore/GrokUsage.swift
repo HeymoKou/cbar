@@ -132,7 +132,8 @@ public enum GrokAuth {
 
 /// `billing?format=credits` JSON → meters. Percent from `creditUsagePercent`
 /// when present; otherwise monthly used/limit, then on-demand used/cap. An
-/// absent percent is NOT treated as 0 — that lied on unified-billing accounts.
+/// absent percent is NOT treated as 0 while those exist — that lied on
+/// unified-billing accounts. Only a bare credit window falls back to 0%.
 public enum GrokUsageMapper {
     public static func percent(in data: Data) -> Double? {
         guard let cfg = config(data) else { return nil }
@@ -159,6 +160,12 @@ public enum GrokUsageMapper {
         if let cap = val(cfg["onDemandCap"]), cap > 0 {
             let used = val(cfg["onDemandUsed"]) ?? 0
             return [Meter(id: "OD", pct: clamp(used / cap * 100), countdown: countdown)]
+        }
+        // A credit window with nothing else to read: proto3 JSON drops a zero
+        // `creditUsagePercent`, and the grok CLI's `/usage` reads that as 0%.
+        // Last resort only — used/limit above wins whenever it exists.
+        if !type.isEmpty {
+            return [Meter(id: id, pct: 0, countdown: countdown)]
         }
         return []
     }
