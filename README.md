@@ -1,7 +1,7 @@
 # cbar
 
 A native macOS menu-bar monitor for your Claude accounts — 5h / 7d / Fable usage
-per account, a color-coded icon, and **automatic switching** between accounts.
+per account and **automatic switching** between accounts.
 Pure Swift, no runtime dependencies: it talks to Claude's OAuth usage API
 directly and keeps credentials in the macOS Keychain. Codex (ChatGPT) accounts
 can be tracked and switched too.
@@ -102,20 +102,28 @@ exception is re-logging the **active** account when its card says so — plain
 `codex login` is right there; any other account re-logs through the footer
 **Codex** button.
 
-Click an account to switch. A switch rewrites `~/.codex/auth.json`, so it
-applies to the **next** `codex` you start; one that is already running keeps
-its account until restarted. cbar refuses to overwrite a login it hasn't saved,
-an API-key login, or a Codex set to keep credentials in the Keychain
-(`cli_auth_credentials_store` other than `file`), and it holds a switch while a
-running Codex is due to refresh its login.
+Click an account to switch. A switch rewrites `~/.codex/auth.json`, which Codex
+reads only when a process starts: a running `codex` keeps its account until
+restarted. cbar refuses to overwrite a login it hasn't saved, an API-key login,
+or a Codex set to keep credentials in the Keychain (`cli_auth_credentials_store`
+other than `file`), and it holds a switch while a running Codex is due to
+refresh its login.
 
-Codex's shared app-server daemon breaks that: a plain `codex` attaches to a
-running daemon, and the daemon reads `auth.json` only when it starts, so every
-new session keeps the daemon's account. cbar warns when a switch lands while the
-daemon is up. To have switches apply, run Codex without it — set
-`daemon_auto_start = false` under `[features]` in `~/.codex/config.toml` and
-`codex app-server daemon stop` (the setting alone doesn't detach from a daemon
-that is already running) — or `codex app-server daemon restart` after a switch.
+**Run Codex without its app-server daemon.** A plain `codex` attaches to the
+shared daemon whenever one is running, and the daemon keeps the account it
+started with — so while it's up, a switch reaches no new session (cbar says so
+when this happens). Turn it off once:
+
+```toml
+# ~/.codex/config.toml
+[features]
+daemon_auto_start = false
+```
+
+then `codex app-server daemon stop`. The setting only stops Codex starting the
+daemon; one that's already running still gets used. If you need the daemon (the
+Desktop app, `codex agents`), `codex app-server daemon restart` after each
+switch instead — that disconnects every session attached to it.
 
 With `"codexAutoSwitchEnabled": true`, cbar switches away when the active
 account's switch window reaches `autoSwitchThreshold` — its **5h** window where
@@ -154,8 +162,9 @@ the key to `false` instead. Every decision is logged: `tail -f ~/.cbar/cbar.log`
 
 ## Behavior notes
 
-- **Icon colors** track the active Claude account: green `<60%`, orange
-  `60–85%`, red `>85%` or any error. Dimmed means its data is over 10 min old.
+- **The menu-bar icon** is a plain glyph; hover it for the active Claude
+  account and its highest usage, or the last error. In the popover a bar turns
+  red at 99%, and an account's data dims once it is over 10 min old.
 - **Rate limits.** The usage endpoint's budget is client-wide, not per-account,
   so each 60 s poll fetches exactly one account — the stalest. Backoff is
   per-account and honors `Retry-After`.
