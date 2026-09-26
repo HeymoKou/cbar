@@ -107,6 +107,11 @@ public struct CodexLogin: Sendable {
 /// process reads. A running process does NOT follow a change to it — Codex
 /// holds its login in memory and refuses a token for a different account — so a
 /// switch lands on the next `codex` launched, not the one already open.
+///
+/// Unless Codex's shared app-server daemon is up: a plain `codex` attaches to a
+/// running daemon — even with `daemon_auto_start` off — and the daemon reads
+/// `auth.json` only when it starts, so every new session keeps the daemon's
+/// account (see `daemonRunning`).
 public enum CodexLive {
     public enum State {
         /// No `auth.json` at all: logged out.
@@ -176,6 +181,15 @@ public enum CodexLive {
     /// guards and a false positive costs a retry after the cooldown.
     public static func codexRunning() -> Bool {
         UsageService.pgrepMatches(["-ix", "codex"])
+    }
+
+    /// Whether the shared app-server daemon (`codex app-server --listen unix://`)
+    /// is up. While it is, a switch rewrites `auth.json` but no new `codex`
+    /// session sees it until the daemon restarts — said out loud after a switch,
+    /// because "switched" would otherwise be a quiet lie. A killed pgrep reads as
+    /// running, which only costs a needless warning.
+    public static func daemonRunning() -> Bool {
+        UsageService.pgrepMatches(["-f", "bin/codex app-server --listen unix:"])
     }
 
     /// `cli_auth_credentials_store` from `config.toml`, or nil when unset (the

@@ -278,7 +278,11 @@ final class UsageStore {
             guard let self else { return }
             do {
                 try self.codexSwitcher.switchTo(target)
-                CbarLog.write("codex auto-switch OK → #\(target) (new codex sessions only)")
+                if CodexLive.daemonRunning() {
+                    CbarLog.write("codex auto-switch wrote #\(target) to auth.json, but the app-server daemon is running — NOT applied until it restarts")
+                } else {
+                    CbarLog.write("codex auto-switch OK → #\(target) (new codex sessions only)")
+                }
             } catch {
                 CbarLog.write("codex auto-switch FAILED → #\(target): \(error) (retry after cooldown)")
             }
@@ -292,9 +296,13 @@ final class UsageStore {
             lastCodexSwitchAt = Date()
             mutate("switch Codex to #\(account.number)") { [weak self, codexSwitcher] in
                 try codexSwitcher.switchTo(account.number)
-                CbarLog.write("codex manual switch → #\(account.number)")
+                let daemon = CodexLive.daemonRunning()
+                CbarLog.write("codex manual switch → #\(account.number)"
+                              + (daemon ? " — app-server daemon running, NOT applied until it restarts" : ""))
                 DispatchQueue.main.async {
-                    self?.notice = "Codex switched to \(account.email) — applies to the next codex you start"
+                    self?.notice = daemon
+                        ? "Codex login set to \(account.email), but the Codex daemon is running and keeps its account — run `codex app-server daemon stop`"
+                        : "Codex switched to \(account.email) — applies to the next codex you start"
                 }
             }
             return

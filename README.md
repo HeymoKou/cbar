@@ -109,6 +109,14 @@ an API-key login, or a Codex set to keep credentials in the Keychain
 (`cli_auth_credentials_store` other than `file`), and it holds a switch while a
 running Codex is due to refresh its login.
 
+Codex's shared app-server daemon breaks that: a plain `codex` attaches to a
+running daemon, and the daemon reads `auth.json` only when it starts, so every
+new session keeps the daemon's account. cbar warns when a switch lands while the
+daemon is up. To have switches apply, run Codex without it — set
+`daemon_auto_start = false` under `[features]` in `~/.codex/config.toml` and
+`codex app-server daemon stop` (the setting alone doesn't detach from a daemon
+that is already running) — or `codex app-server daemon restart` after a switch.
+
 With `"codexAutoSwitchEnabled": true`, cbar switches away when the active
 account's switch window reaches `autoSwitchThreshold` — its **5h** window where
 the plan has one, otherwise its **weekly** one — or its week hits 99%. It moves
