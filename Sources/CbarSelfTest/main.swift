@@ -287,6 +287,9 @@ let usageReset = #"{"five_hour":{"utilization":50.0,"resets_at":"2035-01-02T03:0
 let mr = try UsageMapper.meters(from: Data(usageReset.utf8))
 assert(mr.first?.countdown != nil, "fractional resets_at must yield a countdown (not nil)")
 assert(mr.first!.countdown!.contains("d"), "far-future reset → days countdown, got \(mr.first!.countdown!)")
+let mrEpoch = ISO8601DateFormatter().date(from: "2035-01-02T03:04:05Z")!.timeIntervalSince1970
+assert(mr.first?.resetsAt.map { abs($0 - mrEpoch) < 1 } == true, "resets_at lands on the meter as an absolute time")
+assert(um.allSatisfy { $0.resetsAt == nil }, "null / missing resets_at -> no absolute reset")
 // soonestReset: earliest absolute reset across windows (epoch), nil when none present
 let resetJson = #"{"five_hour":{"utilization":50.0,"resets_at":"2035-01-02T03:04:05+00:00"},"seven_day":{"utilization":20.0,"resets_at":"2035-01-01T00:00:00+00:00"}}"#
 let sr = UsageMapper.soonestReset(from: Data(resetJson.utf8))
@@ -544,12 +547,41 @@ func warm7d(_ n: Int, active: Bool, fiveH: Double, sevenD: Double, status: Strin
             ageSeconds: age, provider: "claude")
 }
 
-// --- burnHome: highest-5h healthy slot below the escape threshold ---
+// --- burnHome: soonest 7d reset among healthy slots below the escape threshold;
+// with no reset known it falls back to the highest 5h ---
 assert(burnHome([acc7d(1, false, fiveH: 40, sevenD: 10),
                  acc7d(2, false, fiveH: 61, sevenD: 20),
                  acc7d(3, false, fiveH: 55, sevenD: 20)]) == 2, "burn home = highest 5h under threshold")
 assert(burnHome([acc7d(1, false, fiveH: 95, sevenD: 10),      // over threshold -> excluded
                  acc7d(2, false, fiveH: 40, sevenD: 20)]) == 2, "burn home excludes >= escape threshold")
+
+// The 2026-10-05 state: both just pre-warmed, #2 a point higher, but #1's week
+// resets in 16h against #2's 5 days -> burn #1.
+func accReset(_ n: Int, _ active: Bool, fiveH: Double, sevenD: Double, resetIn: Double?) -> Account {
+    Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: "ok",
+            meters: [Meter(id: "5h", pct: fiveH, countdown: nil),
+                     Meter(id: "7d", pct: sevenD, countdown: nil, resetsAt: resetIn.map { 1000 + $0 })],
+            ageSeconds: 1, provider: "claude")
+}
+assert(burnHome([accReset(1, false, fiveH: 5, sevenD: 31, resetIn: 16 * 3600),
+                 accReset(2, true, fiveH: 6, sevenD: 34, resetIn: 5 * 86400)], now: 1000) == 1, "burn home = soonest 7d reset, not highest 5h")
+assert(preWarmMove(accounts: [accReset(1, false, fiveH: 5, sevenD: 31, resetIn: 16 * 3600),
+                              accReset(2, true, fiveH: 6, sevenD: 34, resetIn: 5 * 86400)], active: 2, now: 1000) == 1, "return to the soonest-reset account")
+assert(preWarmMove(accounts: [accReset(1, true, fiveH: 5, sevenD: 31, resetIn: 16 * 3600),
+                              accReset(2, false, fiveH: 60, sevenD: 34, resetIn: 5 * 86400)], active: 1, now: 1000) == nil, "on the soonest-reset account -> stay, however high the other's 5h")
+// soonest-reset slot over the threshold -> the next one is home.
+assert(burnHome([accReset(1, false, fiveH: 95, sevenD: 31, resetIn: 16 * 3600),
+                 accReset(2, false, fiveH: 6, sevenD: 34, resetIn: 5 * 86400)], now: 1000) == 2, "soonest reset over threshold is excluded")
+// unknown or already-passed reset ranks behind a known one.
+assert(burnHome([accReset(1, false, fiveH: 60, sevenD: 31, resetIn: nil),
+                 accReset(2, false, fiveH: 6, sevenD: 34, resetIn: 5 * 86400)], now: 1000) == 2, "unknown reset ranks last")
+assert(burnHome([accReset(1, false, fiveH: 60, sevenD: 31, resetIn: -60),
+                 accReset(2, false, fiveH: 6, sevenD: 34, resetIn: 5 * 86400)], now: 1000) == 2, "a reset in the past is unknown")
+// same reset -> highest 5h, then lowest number.
+assert(burnHome([accReset(1, false, fiveH: 6, sevenD: 31, resetIn: 3600),
+                 accReset(2, false, fiveH: 40, sevenD: 34, resetIn: 3600)], now: 1000) == 2, "reset tie -> highest 5h")
+assert(burnHome([accReset(1, false, fiveH: 6, sevenD: 31, resetIn: 3600),
+                 accReset(2, false, fiveH: 6, sevenD: 34, resetIn: 3600)], now: 1000) == 1, "full tie -> lowest number")
 
 // --- excursion: prime a COLD idle while burning #1(60%) ---
 // two cold idles -> the cheapest weekly one.

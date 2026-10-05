@@ -228,16 +228,36 @@ public func freshActiveReading(_ a: Account) -> Bool {
         && a.meters.contains { $0.id == "5h" } && hasSevenDay(a)
 }
 
+/// When this account's 7d window resets (epoch seconds), or nil when unknown: no
+/// 7d meter, no reset on it, or one already in the past — a rolled-over window
+/// whose new reset hasn't been fetched yet says nothing about urgency.
+public func sevenDayReset(_ a: Account, now: Double) -> Double? {
+    guard let r = a.meters.first(where: { $0.id == "7d" })?.resetsAt, r > now else { return nil }
+    return r
+}
+
 /// The "burn" account: the one real work should consume toward its 5h limit.
-/// Highest 5h among healthy, non-exhausted slots still BELOW the escape threshold
-/// — burning it only raises its 5h, so it stays the highest and this choice is
-/// stable (no oscillation). The instant it crosses the threshold the escape path
-/// (`autoSwitchTarget`) moves off it and the next-highest becomes home, so the
-/// two never fight. Derived, not remembered: no state to persist or resync.
-public func burnHome(_ accounts: [Account], escapeThreshold: Double = 93) -> Int? {
+/// Among healthy, non-exhausted slots still BELOW the escape threshold, the one
+/// whose 7d window resets SOONEST — weekly quota left at the reset is lost, so
+/// the week closest to expiring is spent first. Unknown resets rank last; ties
+/// fall to the highest 5h, then the lowest number.
+///
+/// Highest-5h alone used to decide this. Right after a pre-warm both slots sit
+/// just past 5%, so which one read a point higher on its poll picked the burn
+/// account for the whole window: over 2026-09-30..10-05 the login returned to
+/// #2 (week resetting in 5 days) 9 times and to #1 (resetting in 16 hours) 4.
+///
+/// Stable for the same reason highest-5h was: burning an account doesn't move
+/// its reset time, so the choice can't oscillate. It changes only when the home
+/// crosses the threshold or exhausts its week (the escape path,
+/// `autoSwitchTarget`, moves off it and the next-soonest becomes home) or when
+/// its week rolls over. Derived, not remembered: no state to persist or resync.
+public func burnHome(_ accounts: [Account], escapeThreshold: Double = 93,
+                     now: Double = Date().timeIntervalSince1970) -> Int? {
     accounts.filter { $0.provider == "claude" && isSwitchTarget($0) && switchPct($0) < escapeThreshold }
-        .max(by: { a, b in
-            switchPct(a) != switchPct(b) ? switchPct(a) < switchPct(b) : a.number > b.number
+        .min(by: {
+            (sevenDayReset($0, now: now) ?? .infinity, -switchPct($0), Double($0.number))
+                < (sevenDayReset($1, now: now) ?? .infinity, -switchPct($1), Double($1.number))
         })?.number
 }
 
@@ -254,10 +274,11 @@ public func burnHome(_ accounts: [Account], escapeThreshold: Double = 93) -> Int
 /// An earlier design held on each warmed idle and kept burning IT, which stranded
 /// the real work account (cfr): pre-warm is meant to prime idles and hand the
 /// login back, not to move where you work. The return target is `burnHome`, which
-/// is derived (highest-5h healthy), so it can't oscillate the way a
-/// lowest-weekly "settle" did.
+/// is derived (soonest 7d reset among the healthy), so it can't oscillate the way
+/// a lowest-weekly "settle" did.
 public func preWarmMove(accounts: [Account], active: Int, target: Double = 5,
-                        weeklySkip: Double = 95, escapeThreshold: Double = 93) -> Int? {
+                        weeklySkip: Double = 95, escapeThreshold: Double = 93,
+                        now: Double = Date().timeIntervalSince1970) -> Int? {
     let claude = accounts.filter { $0.provider == "claude" }
     guard let activeAcc = claude.first(where: { $0.number == active }) else { return nil }
     // Decide only on a trustworthy active reading. A stale / re-auth active → stay
@@ -283,7 +304,7 @@ public func preWarmMove(accounts: [Account], active: Int, target: Double = 5,
         return cold.number
     }
     // Nothing cold left to prime → hand the login back to the burn account.
-    if let home = burnHome(accounts, escapeThreshold: escapeThreshold), home != active {
+    if let home = burnHome(accounts, escapeThreshold: escapeThreshold, now: now), home != active {
         return home
     }
     return nil

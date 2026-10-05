@@ -145,7 +145,8 @@ public enum UsageMapper {
         func win(_ key: String, _ id: String) {
             guard let w = o[key] as? [String: Any] else { return }
             guard let u = (w["utilization"] as? Double) ?? (w["utilization"] as? Int).map(Double.init) else { return }
-            m.append(Meter(id: id, pct: u, countdown: countdown(w["resets_at"] as? String)))
+            let iso = w["resets_at"] as? String
+            m.append(Meter(id: id, pct: u, countdown: countdown(iso), resetsAt: epoch(iso)))
         }
         win("five_hour", "5h")
         win("seven_day", "7d")
@@ -154,7 +155,8 @@ public enum UsageMapper {
                 let name = ((lim["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
                 let pct = (lim["percent"] as? Double) ?? (lim["percent"] as? Int).map(Double.init)
                 if let name, let pct {
-                    m.append(Meter(id: name == "Fable" ? "Fbl" : name, pct: pct, countdown: countdown(lim["resets_at"] as? String)))
+                    let iso = lim["resets_at"] as? String
+                    m.append(Meter(id: name == "Fable" ? "Fbl" : name, pct: pct, countdown: countdown(iso), resetsAt: epoch(iso)))
                 }
             }
         }
@@ -165,7 +167,7 @@ public enum UsageMapper {
     /// raw usage JSON, or nil if none carry one. This is the fact `fetchPlan` needs
     /// to hot-reload an account the moment a window rolls over — `Meter.countdown`
     /// is a relative string computed once at fetch and can't be compared to a
-    /// later `now`. Kept out of `Meter` on purpose: only the scheduler reads it.
+    /// later `now`.
     public static func soonestReset(from data: Data) -> Double? {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         var soonest: Double?
@@ -180,6 +182,10 @@ public enum UsageMapper {
             consider(lim["resets_at"] as? String)
         }
         return soonest
+    }
+
+    static func epoch(_ iso: String?) -> Double? {
+        iso.flatMap(parseISO)?.timeIntervalSince1970
     }
 
     static func countdown(_ iso: String?) -> String? {

@@ -77,8 +77,9 @@ of a window that may already be half spent.
 
 Pre-warm opens them ahead of time, and costs no extra quota: it sends no requests
 of its own, it only re-points where your **own** traffic lands. Brief excursions
-onto a cold idle account to start its timer, then back to the burn account. It
-acts only while Claude Code is running. The 93% escape outranks it.
+onto a cold idle account to start its timer, then back to the burn account —
+the one whose **7d** window resets soonest, since weekly quota left at the reset
+is lost. It acts only while Claude Code is running. The 93% escape outranks it.
 
 ## Codex
 
