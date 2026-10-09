@@ -58,6 +58,11 @@ a one-time import from `~/.claude-swap-backup`.
 
 ## Auto-switch
 
+Use the popover's **On / Off** radio buttons for **Claude auto-switch**,
+**Codex auto-switch**, and **Claude pre-warm**. Changes are saved immediately
+to the config file and survive restarts. Pre-warm switches Claude accounts
+independently; turn both Claude controls off to stop automatic Claude switching.
+
 cbar switches away from the **active** account when either is true:
 
 - its **5h** usage reaches `autoSwitchThreshold`, or

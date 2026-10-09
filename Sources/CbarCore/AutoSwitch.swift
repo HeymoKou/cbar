@@ -64,6 +64,39 @@ public struct CbarConfig {
         return true
     }
 
+    public enum SwitchSetting: String, CaseIterable {
+        case claude = "autoSwitchEnabled"
+        case codex = "codexAutoSwitchEnabled"
+        case preWarm = "preWarmEnabled"
+    }
+
+    public func isEnabled(_ setting: SwitchSetting) -> Bool {
+        switch setting {
+        case .claude: return autoSwitchEnabled
+        case .codex: return codexAutoSwitchEnabled
+        case .preWarm: return preWarmEnabled
+        }
+    }
+
+    /// Patch only the selected key, preserving thresholds and unknown settings.
+    /// Refuse malformed files rather than replacing them with defaults.
+    public static func setEnabled(_ enabled: Bool, for setting: SwitchSetting,
+                                  dir: String = "\(NSHomeDirectory())/.cbar") throws {
+        let path = "\(dir)/config.json"
+        var object: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: path) {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw NSError(domain: "CbarConfig", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "config.json must contain a JSON object"])
+            }
+            object = parsed
+        }
+        object[setting.rawValue] = enabled
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        try SecureFile.write(data, to: path)
+    }
+
     public static func load(dir: String = "\(NSHomeDirectory())/.cbar") -> CbarConfig {
         var c = CbarConfig()
         guard let d = try? Data(contentsOf: URL(fileURLWithPath: "\(dir)/config.json")),

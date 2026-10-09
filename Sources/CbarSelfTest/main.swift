@@ -1194,6 +1194,37 @@ assert(!seeded.codexAutoSwitchEnabled, "seeded file carries codexAutoSwitchEnabl
 assert(!edited.codexAutoSwitchEnabled, "absent from an existing config → stays off on upgrade")
 try! Data("{\"codexAutoSwitchEnabled\":true}".utf8).write(to: URL(fileURLWithPath: seededPath))
 assert(CbarConfig.load(dir: cfgDir).codexAutoSwitchEnabled, "codexAutoSwitchEnabled: true is honored")
+// UI setting writes preserve unrelated values and round-trip independently.
+try! Data(#"{"autoSwitchThreshold":81,"futureSetting":{"keep":true}}"#.utf8)
+    .write(to: URL(fileURLWithPath: seededPath))
+for setting in CbarConfig.SwitchSetting.allCases {
+    for enabled in [false, true, false] {
+        let before = CbarConfig.load(dir: cfgDir)
+        try! CbarConfig.setEnabled(enabled, for: setting, dir: cfgDir)
+        let after = CbarConfig.load(dir: cfgDir)
+        assert(after.isEnabled(setting) == enabled, "radio selection persists")
+        assert(after.autoSwitchThreshold == 81, "custom threshold survives")
+        for other in CbarConfig.SwitchSetting.allCases where other != setting {
+            assert(after.isEnabled(other) == before.isEnabled(other), "settings stay independent")
+        }
+    }
+}
+let preserved = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: seededPath))) as! [String: Any]
+assert((preserved["futureSetting"] as? [String: Bool])?["keep"] == true, "unknown config survives")
+let savedMode = (try! FileManager.default.attributesOfItem(atPath: seededPath)[.posixPermissions] as! NSNumber).intValue
+assert(savedMode == 0o600, "settings remain owner-only")
+for malformed in ["{broken", "[]"] {
+    let data = Data(malformed.utf8)
+    try! data.write(to: URL(fileURLWithPath: seededPath))
+    var rejected = false
+    do { try CbarConfig.setEnabled(false, for: .claude, dir: cfgDir) }
+    catch { rejected = true }
+    assert(rejected, "invalid config must surface a save error")
+    assert(try! Data(contentsOf: URL(fileURLWithPath: seededPath)) == data, "invalid config is not overwritten")
+}
+try! FileManager.default.removeItem(atPath: seededPath)
+try! CbarConfig.setEnabled(false, for: .claude, dir: cfgDir)
+assert(!CbarConfig.load(dir: cfgDir).autoSwitchEnabled, "missing config can be created from UI")
 print("CONFIG DEFAULTS + SEED OK")
 
 // Grok billing mapper: percent present, percent absent must not become 0,

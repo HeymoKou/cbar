@@ -146,6 +146,7 @@ struct PopoverView: View {
                 VStack(spacing: 4) {
                     if let error = store.lastError { errorBanner(error) }
                     if let notice = store.notice { noticeBanner(notice) }
+                    switchSettings
                     // Any row, not just Claude: Grok/Antigravity snapshots and
                     // a Codex-only store would otherwise never appear.
                     if store.accounts.isEmpty {
@@ -257,6 +258,39 @@ struct PopoverView: View {
             .overlay(Capsule().stroke(armed ? Noct.accentLine : (empty ? Noct.hairlineSoft : Noct.hairline),
                                       lineWidth: 1))
             .foregroundStyle(armed ? Noct.accentText : (empty ? Noct.ink5 : Noct.ink4))
+    }
+
+    private var switchSettings: some View {
+        VStack(spacing: 6) {
+            switchPicker("Claude auto-switch", setting: .claude)
+            switchPicker("Codex auto-switch", setting: .codex)
+            switchPicker("Claude pre-warm", setting: .preWarm)
+            Text("Pre-warm can switch Claude accounts independently.")
+                .font(.system(size: 11))
+                .foregroundStyle(Noct.ink4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+    }
+
+    private func switchPicker(_ title: String, setting: CbarConfig.SwitchSetting) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 12))
+            Spacer()
+            Picker(title, selection: Binding(
+                get: { store.config.isEnabled(setting) },
+                set: { store.setEnabled($0, for: setting) }
+            )) {
+                Text("On").tag(true)
+                Text("Off").tag(false)
+            }
+            .pickerStyle(.radioGroup)
+            .horizontalRadioGroupLayout()
+            .labelsHidden()
+            .fixedSize()
+        }
+        .foregroundStyle(Noct.ink3)
     }
 
     // MARK: body pieces

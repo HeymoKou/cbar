@@ -78,6 +78,18 @@ final class UsageStore {
         codexSwitcher = CodexSwitcher(store: codexStore)
     }
 
+    func setEnabled(_ enabled: Bool, for setting: CbarConfig.SwitchSetting) {
+        do {
+            try CbarConfig.setEnabled(enabled, for: setting)
+            config = CbarConfig.load()
+            lastError = nil
+            CbarLog.write("\(setting.rawValue) = \(enabled)")
+        } catch {
+            lastError = "Could not save auto-switch setting: \(error.localizedDescription)"
+        }
+        onUpdate?()
+    }
+
     /// True when there are no accounts yet but a cswap backup exists to import.
     var canImportCswap: Bool { store.list().isEmpty && CswapImport.available() }
 
@@ -89,6 +101,7 @@ final class UsageStore {
         if CbarConfig.seedIfMissing() {
             CbarLog.write("wrote default ~/.cbar/config.json (auto-switch on, pre-warm on)")
         }
+        config = CbarConfig.load()
         refresh()
         startTimer()
 
