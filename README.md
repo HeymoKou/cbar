@@ -69,7 +69,8 @@ cbar switches away from the **active** account when either is true:
 - its **7d** usage reaches **99%** — a hard ceiling, not a ranking input.
 
 It moves to the account with the most **5h** headroom. A target must be provably
-alive: status ok, a real 5h meter, data no older than the freshness window, 7d
+alive: status ok, a real 5h meter (or, on Ultra — formerly Max 20x — which has
+no 5h window, a real 7d meter), data no older than the freshness window, 7d
 under the ceiling. An account needing re-login is never chosen no matter how much
 headroom its stale cache shows. Codex accounts are never Claude targets; they
 have their own switch, below. 120 s cooldown.

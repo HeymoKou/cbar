@@ -530,11 +530,20 @@ assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 10, sevenD: 100), acc7d
                         threshold: 93) == 2, "exhausted active switches away even to a HIGHER 5h")
 assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 10, sevenD: 100), acc7d(2, false, fiveH: 40, sevenD: 99)],
                         threshold: 93) == nil, "but not into another exhausted account")
-// A missing 5h meter reads as 0% — unknown headroom must not rank best.
+// Ultra (formerly Max 20x) has no 5h window: a fetched 7d with no 5h is a real
+// reading, and the slot is a target gated only by the 7d ceiling.
 let no5h = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
                    meters: [Meter(id: "7d", pct: 10, countdown: nil)], ageSeconds: 1, provider: "claude")
-assert(switchPct(no5h) == 0 && !isSwitchTarget(no5h), "no 5h meter -> not a target despite reading 0%")
-assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), no5h], threshold: 93) == nil, "unknown 5h is not headroom")
+assert(switchPct(no5h) == 0 && isSwitchTarget(no5h), "Ultra slot (7d, no 5h) is a target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), no5h], threshold: 93) == 2, "Ultra slot takes the escape")
+let no5hTight = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
+                        meters: [Meter(id: "7d", pct: 99, countdown: nil)], ageSeconds: 1, provider: "claude")
+assert(!isSwitchTarget(no5hTight), "Ultra slot at the 7d ceiling is not a target")
+// No meters at all (failed fetch / unknown) must still not read as headroom.
+let noMeters = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
+                       meters: [], ageSeconds: 1, provider: "claude")
+assert(!isSwitchTarget(noMeters), "no reading -> not a target")
+assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), noMeters], threshold: 93) == nil, "unknown usage is not headroom")
 // Staleness boundary (aligned with status freshness so 429 storms don't disable switching).
 assert(isSwitchTarget(deadAcc(2, 10, age: 600)), "fresh enough at the boundary")
 assert(!isSwitchTarget(deadAcc(2, 10, age: 601)), "one second past it is not a target")
@@ -648,11 +657,19 @@ assert(preWarmMove(accounts: [acc7d(1, true, fiveH: 3, sevenD: 99),
                               acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == 2, "exhausted active diverts")
 assert(preWarmMove(accounts: [acc7d(1, true, fiveH: 2, sevenD: 97),
                               acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == 2, "weekly-tight active diverts")
-// active missing 5h meter -> stay (undecidable); 7d=97 would wrongly divert if the
-// 5h-meter leg were dropped.
+// Ultra active (no 5h window): a real reading. Weekly-tight diverts like any
+// other; weekly-OK stays.
 let activeNo5h = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
                          meters: [Meter(id: "7d", pct: 97, countdown: nil)], ageSeconds: 1, provider: "claude")
-assert(preWarmMove(accounts: [activeNo5h, acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == nil, "active w/o 5h meter -> stay")
+assert(preWarmMove(accounts: [activeNo5h, acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == 2, "weekly-tight Ultra active diverts")
+let activeUltraOK = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
+                            meters: [Meter(id: "7d", pct: 40, countdown: nil)], ageSeconds: 1, provider: "claude")
+assert(preWarmMove(accounts: [activeUltraOK, acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == nil, "weekly-OK Ultra active stays")
+// An idle Ultra slot has no 5h window to open: never a pre-warm excursion.
+let idleUltra = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
+                        meters: [Meter(id: "7d", pct: 10, countdown: nil)], ageSeconds: 1, provider: "claude")
+assert(preWarmMove(accounts: [acc7d(1, true, fiveH: 30, sevenD: 20), idleUltra], active: 1) == nil,
+       "Ultra idle is not primed as cold")
 // active missing 7d meter -> stay (can't judge weekly).
 let activeNo7d = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
                          meters: [Meter(id: "5h", pct: 2, countdown: nil)], ageSeconds: 1, provider: "claude")

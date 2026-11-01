@@ -219,10 +219,24 @@ public func isExhausted(_ a: Account) -> Bool { sevenDayPct(a) >= sevenDayCeilin
 /// alternate ages past a 300 s gate and the user rides the active account into
 /// the wall. A stale 5h reading also errs safe — usage only climbs, so an old
 /// number understates it.
+///
+/// "A real 5h meter" now means "a real 5h meter, or a real 7d one on a plan with
+/// no 5h window". Ultra (formerly Max 20x) dropped the 5h window, so a healthy
+/// Ultra slot answers with seven_day and no five_hour — and the old gate hid its
+/// Switch button and never chose it (2026-11-01). A fetched 7d meter still
+/// proves the reading is real; a failed fetch has neither, so it stays rejected.
 public func isSwitchTarget(_ a: Account, maxAge: Double = 600) -> Bool {
     a.switchable && a.status == "ok" && (a.ageSeconds ?? .infinity) <= maxAge
-        && a.meters.contains { $0.id == "5h" } && !isExhausted(a)
+        && hasUsageReading(a) && !isExhausted(a)
 }
+
+/// Whether this account's plan has a 5h window at all (Ultra has none).
+public func hasFiveHour(_ a: Account) -> Bool { a.meters.contains { $0.id == "5h" } }
+
+/// A real usage reading to decide on: the 5h meter, or the 7d meter on a plan
+/// without a 5h window. A no-5h account reads 5h = 0% via `switchPct`, which is
+/// true for Ultra — nothing short-term can block it — so only the 7d ceiling applies.
+public func hasUsageReading(_ a: Account) -> Bool { hasFiveHour(a) || hasSevenDay(a) }
 
 /// The account number to auto-switch TO, or nil. Fires when the ACTIVE Claude
 /// account's 5h usage has reached `threshold` OR its 7d window is exhausted, AND
@@ -250,7 +264,8 @@ public func autoSwitchTarget(accounts: [Account], threshold: Double) -> Int? {
 public func hasSevenDay(_ a: Account) -> Bool { a.meters.contains { $0.id == "7d" } }
 
 /// A current, trustworthy reading of the ACTIVE account: real status, fresh
-/// enough that the numbers aren't fiction, and a real 5h meter to decide on.
+/// enough that the numbers aren't fiction, and a real 7d meter to decide on (5h
+/// is optional: Ultra has no 5h window).
 /// Deliberately NOT `isSwitchTarget`: that also rejects a weekly-EXHAUSTED
 /// account, and an exhausted active is a known-good reading pre-warm should act
 /// on (divert away from it), not freeze on. Pre-warm gates on this so it never
@@ -258,7 +273,7 @@ public func hasSevenDay(_ a: Account) -> Bool { a.meters.contains { $0.id == "7d
 /// or churn the live login during a 429 storm).
 public func freshActiveReading(_ a: Account) -> Bool {
     a.status == "ok" && (a.ageSeconds ?? .infinity) <= 600
-        && a.meters.contains { $0.id == "5h" } && hasSevenDay(a)
+        && hasSevenDay(a)
 }
 
 /// When this account's 7d window resets (epoch seconds), or nil when unknown: no
@@ -325,10 +340,11 @@ public func preWarmMove(accounts: [Account], active: Int, target: Double = 5,
     // weekly-tight active fails the 7d check and falls through to divert off it.
     if switchPct(activeAcc) < target, sevenDayPct(activeAcc) < weeklySkip { return nil }
     // Excursion: prime a COLD idle (window not open) — healthy, real 7d meter,
-    // weekly headroom. Cheapest weekly first (protect the scarce 7-day limit), tie
+    // weekly headroom, and a 5h window to open at all (an Ultra slot has none, and
+    // its 0% would otherwise read as forever cold). Cheapest weekly first (protect the scarce 7-day limit), tie
     // freshest 5h, then number. Not `active`, so a just-warmed idle isn't re-picked.
     if let cold = claude.filter({
-        $0.number != active && isSwitchTarget($0) && hasSevenDay($0)
+        $0.number != active && isSwitchTarget($0) && hasSevenDay($0) && hasFiveHour($0)
             && switchPct($0) < target && sevenDayPct($0) < weeklySkip
     }).min(by: {
         (sevenDayPct($0), switchPct($0), Double($0.number))
