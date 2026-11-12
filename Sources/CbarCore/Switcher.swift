@@ -7,7 +7,30 @@ import Foundation
 public struct Switcher {
     public enum SwitchErr: Error { case noCredentials(Int), noOAuthAccount(Int) }
     let store: AccountStore
-    public init(store: AccountStore) { self.store = store }
+    // Where the live login lives, and how to ask whose token it is. Injectable
+    // so the rollback can be tested against throwaway items; the defaults are
+    // Claude Code's real ones.
+    let liveService: String, liveAccount: String, credsFile: String
+    let configPath: String?
+    let profile: (String) throws -> ClaudeConfig.OAuthAccount
+
+    public init(store: AccountStore,
+                liveService: String = Credentials.service, liveAccount: String = Credentials.user,
+                credsFile: String = Credentials.filePath, configPath: String? = nil,
+                profile: @escaping (String) throws -> ClaudeConfig.OAuthAccount = {
+                    try OAuthClient().fetchProfile(accessToken: $0)
+                }) {
+        self.store = store
+        self.liveService = liveService; self.liveAccount = liveAccount; self.credsFile = credsFile
+        self.configPath = configPath; self.profile = profile
+    }
+
+    private func readLive() throws -> ClaudeAiOauth? {
+        try Credentials.readActive(service: liveService, account: liveAccount, file: credsFile)
+    }
+    private func writeLive(_ o: ClaudeAiOauth) throws {
+        try Credentials.writeActive(o, service: liveService, account: liveAccount, file: credsFile)
+    }
 
     public func switchTo(_ number: Int) throws {
         // Refresh the backup of the outgoing login before overwriting it — into
@@ -19,8 +42,8 @@ public struct Switcher {
         // 429 storm (when it's most likely to fire) can't reach the profile API, so
         // the backup is skipped and the outgoing slot keeps a stale, already-rotated
         // token — that account then needs a manual /login and nothing said why.
-        if let curCreds = (try? Credentials.readActive()) ?? nil {
-            if let ident = try? OAuthClient().fetchProfile(accessToken: curCreds.accessToken),
+        if let curCreds = (try? readLive()) ?? nil {
+            if let ident = try? profile(curCreds.accessToken),
                let real = matchSlot(store.list(), live: ident) {
                 do { try store.setCreds(real, curCreds) } catch {
                     CbarLog.write("switch #\(number): backing up outgoing creds into slot #\(real) FAILED: \(error)")
@@ -34,16 +57,16 @@ public struct Switcher {
         guard let targetOAuth = store.oauthAccount(number) else { throw SwitchErr.noOAuthAccount(number) }
 
         // Snapshot originals for rollback.
-        let originalCreds = try? Credentials.readActive()
-        let originalConfig = try? ClaudeConfig.rawConfig()
+        let originalCreds = try? readLive()
+        let originalConfig = try? ClaudeConfig.rawConfig(at: configPath)
 
         do {
-            try Credentials.writeActive(targetCreds)
-            try ClaudeConfig.spliceRawAccount(targetOAuth)
+            try writeLive(targetCreds)
+            try ClaudeConfig.spliceRawAccount(targetOAuth, at: configPath)
             try store.setActive(number)
         } catch {
-            if let oc = originalCreds { try? Credentials.writeActive(oc) }
-            if let cfg = originalConfig { try? ClaudeConfig.writeRaw(cfg) }
+            if let oc = originalCreds { try? writeLive(oc) }
+            if let cfg = originalConfig { try? ClaudeConfig.writeRaw(cfg, at: configPath) }
             throw error
         }
     }

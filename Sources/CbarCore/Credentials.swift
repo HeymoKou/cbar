@@ -16,9 +16,11 @@ public struct ClaudeAiOauth: Codable, Sendable {
 /// plaintext file; writes go to the keychain and only rewrite the file if it
 /// already exists (never creates it).
 public enum Credentials {
-    static var user: String { ProcessInfo.processInfo.environment["USER"] ?? "claude-code-user" }
-    static let service = "Claude Code-credentials"
-    static var filePath: String { "\(NSHomeDirectory())/.claude/.credentials.json" }
+    // Public so a caller (Switcher) can default to them and a test can point
+    // elsewhere — never at the real login.
+    public static var user: String { ProcessInfo.processInfo.environment["USER"] ?? "claude-code-user" }
+    public static let service = "Claude Code-credentials"
+    public static var filePath: String { "\(NSHomeDirectory())/.claude/.credentials.json" }
 
     struct Wrapper: Codable { var claudeAiOauth: ClaudeAiOauth }
 
@@ -37,19 +39,21 @@ public enum Credentials {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
-    public static func readActive() throws -> ClaudeAiOauth? {
-        if let s = try Keychain.get(service: service, account: user), let o = parse(s) { return o }
-        if let s = try? String(contentsOfFile: filePath, encoding: .utf8), let o = parse(s) { return o }
+    public static func readActive(service: String = service, account: String = user,
+                                  file: String = filePath) throws -> ClaudeAiOauth? {
+        if let s = try Keychain.get(service: service, account: account), let o = parse(s) { return o }
+        if let s = try? String(contentsOfFile: file, encoding: .utf8), let o = parse(s) { return o }
         return nil
     }
 
-    public static func writeActive(_ o: ClaudeAiOauth) throws {
+    public static func writeActive(_ o: ClaudeAiOauth, service: String = service, account: String = user,
+                                   file: String = filePath) throws {
         let s = serialize(o)
         // Plain JSON, matching Claude Code's own format — CC reads this item
         // back on startup and cannot parse a base64-encoded one.
-        try Keychain.setRaw(service: service, account: user, value: s)
-        if FileManager.default.fileExists(atPath: filePath) {
-            try? s.write(toFile: filePath, atomically: true, encoding: .utf8)
+        try Keychain.setRaw(service: service, account: account, value: s)
+        if FileManager.default.fileExists(atPath: file) {
+            try? s.write(toFile: file, atomically: true, encoding: .utf8)
         }
     }
 }

@@ -772,6 +772,55 @@ assert(UsageService.fetchCreds(n: 2, liveOwner: nil, live: liveCred, slot: slotC
 assert(UsageService.fetchCreds(n: 2, liveOwner: 1, live: liveCred, slot: nil) == nil, "non-owner without slot creds -> nil, never live")
 print("FETCH CREDS OK")
 
+// ---- Switcher: the live-login rewrite, against throwaway items -------------
+// A failed switch must leave the login it found: keychain item and config both.
+let swDir = NSTemporaryDirectory() + "cbar-selftest-switch-\(getpid())"
+let swStoreSvc = "cbar-selftest-switch-store", swLiveSvc = "cbar-selftest-switch-live", swLiveAcct = "live"
+let swStore = AccountStore(dir: swDir, keychainService: swStoreSvc)
+let swCfg = swDir + "/claude.json", swCredsFile = swDir + "/no-credentials-file.json"
+let swOrig = ClaudeAiOauth(accessToken: "AT-orig", refreshToken: "RT-orig", expiresAt: 9e15, scopes: ["user:inference"])
+let swTarget = ClaudeAiOauth(accessToken: "AT-two", refreshToken: "RT-two", expiresAt: 9e15, scopes: nil)
+let swN1 = try swStore.add(email: "a@x.com", uuid: "U1", orgUuid: "O1", orgName: nil,
+                           oauthJSON: #"{"accountUuid":"U1","emailAddress":"a@x.com","organizationUuid":"O1"}"#, creds: swOrig)
+let swN2 = try swStore.add(email: "b@x.com", uuid: "U2", orgUuid: "O2", orgName: nil,
+                           oauthJSON: #"{"accountUuid":"U2","emailAddress":"b@x.com","organizationUuid":"O2"}"#, creds: swTarget)
+func swLive() -> ClaudeAiOauth? {
+    (try? Credentials.readActive(service: swLiveSvc, account: swLiveAcct, file: swCredsFile)) ?? nil
+}
+try! Credentials.writeActive(swOrig, service: swLiveSvc, account: swLiveAcct, file: swCredsFile)
+let swBroken = "{this is not json"
+try! swBroken.write(toFile: swCfg, atomically: true, encoding: .utf8)
+var swProfileCalls = 0
+let swUnverified = Switcher(store: swStore, liveService: swLiveSvc, liveAccount: swLiveAcct,
+                            credsFile: swCredsFile, configPath: swCfg,
+                            profile: { _ in swProfileCalls += 1; throw OAuthError.network })
+var swThrew = false
+do { try swUnverified.switchTo(swN2) } catch { swThrew = true }
+assert(swThrew, "a config that can't be spliced fails the switch")
+assert(swProfileCalls == 1, "outgoing login's identity was asked for, via the injected lookup")
+assert(swLive()?.accessToken == "AT-orig" && swLive()?.refreshToken == "RT-orig", "keychain rolled back to the original login")
+assert((try? String(contentsOfFile: swCfg, encoding: .utf8)) == swBroken, "config restored as it was")
+assert(swStore.activeNumber() == swN1, "active pointer not moved by a failed switch")
+assert(!FileManager.default.fileExists(atPath: swCredsFile), "no credentials file created")
+// The happy path, with the outgoing login backed up into the slot its PROFILE names.
+try! #"{"numStartups":7,"oauthAccount":{"accountUuid":"U1"}}"#.write(toFile: swCfg, atomically: true, encoding: .utf8)
+let swRotated = ClaudeAiOauth(accessToken: "AT-rot", refreshToken: "RT-rot", expiresAt: 9e15, scopes: nil)
+try! Credentials.writeActive(swRotated, service: swLiveSvc, account: swLiveAcct, file: swCredsFile)
+let swVerified = Switcher(store: swStore, liveService: swLiveSvc, liveAccount: swLiveAcct,
+                          credsFile: swCredsFile, configPath: swCfg,
+                          profile: { _ in .init(emailAddress: nil, accountUuid: "U1", organizationUuid: "O1", organizationName: nil) })
+try swVerified.switchTo(swN2)
+assert(swLive()?.accessToken == "AT-two", "target login is live")
+assert((try? swStore.creds(swN1))??.accessToken == "AT-rot", "outgoing login backed up into its own slot")
+let swCfgAfter = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: swCfg))) as! [String: Any]
+assert((swCfgAfter["oauthAccount"] as? [String: Any])?["accountUuid"] as? String == "U2"
+       && swCfgAfter["numStartups"] as? Int == 7, "oauthAccount spliced, other keys kept")
+assert(swStore.activeNumber() == swN2, "active pointer moved")
+for n in [swN1, swN2] { try? Keychain.delete(service: swStoreSvc, account: "account-\(n)") }
+try? Keychain.delete(service: swLiveSvc, account: swLiveAcct)
+try? FileManager.default.removeItem(atPath: swDir)
+print("SWITCHER OK")
+
 // ---- pollsWhileDark: keep working behind a sleeping display ------------------
 // Armed AND in use. Before this, screen sleep hard-stopped the poll timer, so an
 // unattended overnight session rode its account into the wall with cbar sitting
