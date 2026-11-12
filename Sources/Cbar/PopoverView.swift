@@ -131,6 +131,8 @@ struct PopoverView: View {
         return max(240, usable)
     }
     @ViewState private var listHeight: CGFloat = 0
+    @ViewState private var showSettings = false
+    @ViewState private var pillHovering = false
 
     /// Claude active first, then other Claude accounts, then Codex, Grok,
     /// Antigravity — monitor-only cards stay below anything switchable.
@@ -170,7 +172,7 @@ struct PopoverView: View {
                 VStack(spacing: 4) {
                     if let error = store.lastError { errorBanner(error) }
                     if let notice = store.notice { noticeBanner(notice) }
-                    switchSettings
+                    if showSettings { settingsArea }
                     // Any row, not just Claude: Grok/Antigravity snapshots and
                     // a Codex-only store would otherwise never appear.
                     if store.accounts.isEmpty {
@@ -266,7 +268,8 @@ struct PopoverView: View {
 
     /// One chip, two jobs: the account count normally, and the armed threshold
     /// when auto-switch is on — because that is the fact that changes what the
-    /// panel is about to do on its own.
+    /// panel is about to do on its own. Clicking it opens the settings that
+    /// decide what it says.
     private var statusPill: some View {
         let auto = store.config.autoSwitchEnabled
         let warm = store.config.preWarmEnabled
@@ -280,46 +283,63 @@ struct PopoverView: View {
         else if auto { text = "AUTO ON · \(Int(store.config.autoSwitchThreshold))%" }
         else if warm { text = "PRE-WARM ON" }
         else { text = "\(claudeAccounts.count) ACCOUNT\(claudeAccounts.count == 1 ? "" : "S")" }
-        return Text(text)
-            .font(.system(size: 12, weight: .medium))
-            .tracking(0.6)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .overlay(Capsule().stroke(armed ? Noct.accentLine : (empty ? Noct.hairlineSoft : Noct.hairline),
-                                      lineWidth: 1))
-            .foregroundStyle(armed ? Noct.accentText : (empty ? Noct.ink5 : Noct.ink4))
+        // Filled while the settings are open, washed on hover — the only cues
+        // that it is a control, since a chevron would not fit the header.
+        let wash: Color = showSettings ? (armed ? Noct.accentFill : Color.primary.opacity(0.08))
+                                       : Color.primary.opacity(pillHovering ? 0.06 : 0)
+        return Button { showSettings.toggle() } label: {
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+                .tracking(0.6)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Capsule().fill(wash))
+                .overlay(Capsule().stroke(armed ? Noct.accentLine : (empty ? Noct.hairlineSoft : Noct.hairline),
+                                          lineWidth: 1))
+                .foregroundStyle(armed ? Noct.accentText : (empty ? Noct.ink5 : Noct.ink4))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { pillHovering = $0 }
+        .modifier(PointerCursor())
+        .animation(.easeOut(duration: 0.12), value: pillHovering)
+        .help(showSettings ? "Hide settings" : "Settings")
+        .accessibilityLabel("Settings")
+        .accessibilityValue(text)
     }
 
-    private var switchSettings: some View {
-        VStack(spacing: 6) {
-            switchPicker("Claude auto-switch", setting: .claude)
-            switchPicker("Codex auto-switch", setting: .codex)
-            switchPicker("Claude pre-warm", setting: .preWarm)
+    /// Collapsed by default: these are set once and then read off the pill,
+    /// and as three always-on rows they pushed every account down the panel.
+    private var settingsArea: some View {
+        let t = Int(store.config.autoSwitchThreshold)
+        return VStack(alignment: .leading, spacing: 7) {
+            settingSwitch("Claude auto-switch at \(t)%", setting: .claude)
+            settingSwitch("Claude pre-warm", setting: .preWarm)
             Text("Pre-warm can switch Claude accounts independently.")
                 .font(.system(size: 11))
                 .foregroundStyle(Noct.ink4)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            settingSwitch("Codex auto-switch at \(t)%", setting: .codex)
+            settingSwitch("Percent in the menu bar", setting: .menuBarPercent)
         }
-        .padding(10)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Noct.hairline, lineWidth: 1))
     }
 
-    private func switchPicker(_ title: String, setting: CbarConfig.SwitchSetting) -> some View {
+    private func settingSwitch(_ title: String, setting: CbarConfig.SwitchSetting) -> some View {
         HStack {
             Text(title)
                 .font(.system(size: 12))
-            Spacer()
-            Picker(title, selection: Binding(
+                .foregroundStyle(Noct.ink3)
+            Spacer(minLength: 8)
+            Toggle(title, isOn: Binding(
                 get: { store.config.isEnabled(setting) },
                 set: { store.setEnabled($0, for: setting) }
-            )) {
-                Text("On").tag(true)
-                Text("Off").tag(false)
-            }
-            .pickerStyle(.radioGroup)
-            .horizontalRadioGroupLayout()
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .tint(Noct.accent)
             .labelsHidden()
-            .fixedSize()
         }
-        .foregroundStyle(Noct.ink3)
     }
 
     // MARK: body pieces
