@@ -84,7 +84,7 @@ public final class AccountStore {
         (try? JSONSerialization.data(withJSONObject: obj)).flatMap { String(data: $0, encoding: .utf8) }
     }
     public func setCreds(_ n: Int, _ o: ClaudeAiOauth) throws {
-        try Keychain.set(service: kcService, account: kcAccount(n), value: Credentials.serialize(o))
+        _ = try Credentials.writeFitting(o) { try Keychain.set(service: kcService, account: kcAccount(n), value: $0) }
     }
 
     // MARK: writes

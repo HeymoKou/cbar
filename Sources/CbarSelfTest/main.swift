@@ -215,6 +215,28 @@ assert(Credentials.parse(Credentials.serialize(cred))!.refreshToken == "r", "cre
 // item mid-switch (first JSON line overwrote it with "{"). serialize must stay
 // single-line; setRaw must refuse newlines BEFORE touching the keychain.
 assert(!Credentials.serialize(cred).contains("\n"), "serialize must be single-line for security -i")
+// The blob Claude Code writes carries more than the tokens. A refresh or a
+// switch rewrote it from four decoded fields and dropped the rest — inside
+// `claudeAiOauth` (plan, tier, refresh-token expiry) and beside it.
+let fullBlob = #"{"claudeAiOauth":{"accessToken":"a","expiresAt":1783672677350,"rateLimitTier":"default_claude_max_20x","refreshToken":"r","refreshTokenExpiresAt":1790000000000,"scopes":["user:inference","user:profile"],"subscriptionType":"max","subscriptionTypeSource":"profile"},"mcpOAuth":{"srv|abc":{"accessToken":"m","serverUrl":"https://x.example/mcp"}}}"#
+var fb = Credentials.parse(fullBlob)!
+assert(Credentials.serialize(fb) == fullBlob, "an untouched blob round-trips byte for byte")
+fb.accessToken = "a2"; fb.refreshToken = "r2"; fb.expiresAt = 1783672999000; fb.scopes = ["user:inference"]
+let fbOut = Credentials.serialize(fb)
+let fbRoot = try! JSONSerialization.jsonObject(with: Data(fbOut.utf8)) as! [String: Any]
+let fbInner = fbRoot["claudeAiOauth"] as! [String: Any]
+assert(fbInner["subscriptionType"] as? String == "max" && fbInner["subscriptionTypeSource"] as? String == "profile"
+       && fbInner["rateLimitTier"] as? String == "default_claude_max_20x"
+       && (fbInner["refreshTokenExpiresAt"] as? NSNumber)?.int64Value == 1790000000000, "unknown claudeAiOauth keys survive")
+assert(((fbRoot["mcpOAuth"] as? [String: Any])?["srv|abc"] as? [String: Any])?["serverUrl"] as? String == "https://x.example/mcp",
+       "unknown top-level keys survive")
+assert(fbInner["accessToken"] as? String == "a2" && fbInner["refreshToken"] as? String == "r2"
+       && fbInner["scopes"] as? [String] == ["user:inference"], "token fields replaced")
+assert(!fbOut.contains("\n") && fbOut.contains(#""expiresAt":1783672999000,"#), "compact, integral expiresAt: \(fbOut)")
+// Slot copies written by older versions hold only the four fields.
+let oldSlot = #"{"claudeAiOauth":{"accessToken":"a","expiresAt":1783672677350,"refreshToken":"r","scopes":["user:inference"]}}"#
+assert(Credentials.parse(oldSlot)?.refreshToken == "r", "old slot copy loads")
+assert(Credentials.serialize(Credentials.parse(oldSlot)!) == oldSlot, "…and writes back unchanged")
 try! Keychain.setRaw(service: ks, account: "nl", value: "precious")
 do {
     try Keychain.setRaw(service: ks, account: "nl", value: "{\n  \"a\": 1\n}")
@@ -330,6 +352,19 @@ assert(store.list().count == 1 && store.list()[0].email == "a@x.com", "store add
 assert(store.activeNumber() == n1, "first = active")
 let c1 = try store.creds(n1)
 assert(c1?.accessToken == "AT", "creds back")
+// Slot copies keep the whole blob too — they are what a switch writes live.
+try store.setCreds(n1, Credentials.parse(fullBlob)!)
+let fullBack = try store.creds(n1)
+assert(fullBack.map { Credentials.serialize($0) } == fullBlob, "slot copy is lossless")
+// Too big for `security -i` once base64'd (CC's MCP tokens share the item): the
+// login itself must still land rather than the rotated token being lost.
+let bigBlob = fullBlob.replacingOccurrences(of: #""accessToken":"m""#,
+                                            with: "\"accessToken\":\"\(String(repeating: "m", count: 3500))\"")
+try store.setCreds(n1, Credentials.parse(bigBlob)!)
+let bigBack = try store.creds(n1)
+assert(bigBack?.accessToken == "a" && bigBack.map { Credentials.serialize($0).contains("subscriptionType") } == true
+       && bigBack.map { Credentials.serialize($0).contains("mcpOAuth") } == false, "oversized blob falls back to claudeAiOauth")
+try store.setCreds(n1, sc)
 let n2 = try store.add(email: "a@x.com", uuid: "U1", orgUuid: "O1", orgName: "Org", creds: sc) // re-capture same identity
 assert(n1 == n2 && store.list().count == 1, "re-capture dedup")
 try store.remove(n1)
@@ -787,7 +822,8 @@ let swN2 = try swStore.add(email: "b@x.com", uuid: "U2", orgUuid: "O2", orgName:
 func swLive() -> ClaudeAiOauth? {
     (try? Credentials.readActive(service: swLiveSvc, account: swLiveAcct, file: swCredsFile)) ?? nil
 }
-try! Credentials.writeActive(swOrig, service: swLiveSvc, account: swLiveAcct, file: swCredsFile)
+let swOrigRaw = #"{"claudeAiOauth":{"accessToken":"AT-orig","expiresAt":9000000000000000,"refreshToken":"RT-orig","scopes":["user:inference"],"subscriptionType":"max"},"mcpOAuth":{"srv":{"accessToken":"m"}}}"#
+try! Keychain.setRaw(service: swLiveSvc, account: swLiveAcct, value: swOrigRaw)
 let swBroken = "{this is not json"
 try! swBroken.write(toFile: swCfg, atomically: true, encoding: .utf8)
 var swProfileCalls = 0
@@ -798,7 +834,7 @@ var swThrew = false
 do { try swUnverified.switchTo(swN2) } catch { swThrew = true }
 assert(swThrew, "a config that can't be spliced fails the switch")
 assert(swProfileCalls == 1, "outgoing login's identity was asked for, via the injected lookup")
-assert(swLive()?.accessToken == "AT-orig" && swLive()?.refreshToken == "RT-orig", "keychain rolled back to the original login")
+assert(try! Keychain.getRaw(service: swLiveSvc, account: swLiveAcct) == swOrigRaw, "keychain rolled back to the original blob, every field")
 assert((try? String(contentsOfFile: swCfg, encoding: .utf8)) == swBroken, "config restored as it was")
 assert(swStore.activeNumber() == swN1, "active pointer not moved by a failed switch")
 assert(!FileManager.default.fileExists(atPath: swCredsFile), "no credentials file created")

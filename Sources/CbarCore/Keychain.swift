@@ -46,9 +46,10 @@ public enum Keychain {
     /// 4 KB Codex `auth.json` did both on its first real write (2026-09-16).
     /// Refuse before anything reaches `security`.
     static let maxLine = 4096
+    static let tooLarge: Int32 = -4
     static func checkLine(_ cmd: String, service: String) throws {
         guard cmd.utf8.count <= maxLine else {
-            throw KErr.failed(-4, "set \(service): value too large for security -i (\(cmd.utf8.count) > \(maxLine) bytes)")
+            throw KErr.failed(tooLarge, "set \(service): value too large for security -i (\(cmd.utf8.count) > \(maxLine) bytes)")
         }
     }
 
