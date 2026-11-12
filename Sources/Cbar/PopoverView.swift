@@ -322,6 +322,7 @@ struct PopoverView: View {
                 .fixedSize(horizontal: false, vertical: true)
             settingSwitch("Codex auto-switch at \(t)%", setting: .codex)
             settingSwitch("Percent in the menu bar", setting: .menuBarPercent)
+            settingSwitch("Notify when cbar switches on its own", setting: .notify)
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Noct.hairline, lineWidth: 1))
@@ -687,18 +688,35 @@ struct AccountCard: View {
         }
     }
 
+    /// Rows as `meterRows` lays them out. Rows under a leading 5h/7d row are
+    /// compact; paired pools are peers, so those rows all stay full size.
     private func meterRow(now: Double) -> some View {
-        HStack(spacing: 12) {
-            ForEach(acc.meters) { m in
-                ScanMeter(label: meterLabel(m.id),
-                          pct: m.pct,
-                          caption: caption(for: m, now: now),
-                          captionColor: captionColor(for: m),
-                          mark: ProviderMark.Kind.meter(m.id),
-                          color: Metric.color(for: m.id),
-                          numberColor: acc.isActive ? Metric.number(for: m.id) : Noct.ink2,
-                          threshold: m.id == switchMeter && acc.isActive ? threshold : nil,
-                          stale: stale)
+        let rows = meterRows(acc.meters.map(\.id))
+        let led = ["5h", "7d", "30d"].contains(acc.meters.first?.id ?? "")
+        return VStack(alignment: .leading, spacing: 9) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { r, row in
+                let captions = row.map { i in i.flatMap { caption(for: acc.meters[$0], now: now) } }
+                let anyCaption = captions.contains { $0 != nil }
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(Array(row.enumerated()), id: \.offset) { c, i in
+                        if let i {
+                            let m = acc.meters[i]
+                            ScanMeter(label: meterLabel(m.id),
+                                      pct: m.pct,
+                                      caption: captions[c],
+                                      captionColor: captionColor(for: m),
+                                      mark: ProviderMark.Kind.meter(m.id),
+                                      color: Metric.color(for: m.id),
+                                      numberColor: acc.isActive ? Metric.number(for: m.id) : Noct.ink2,
+                                      threshold: m.id == switchMeter && acc.isActive ? threshold : nil,
+                                      stale: stale,
+                                      compact: led && r > 0,
+                                      reservesCaption: anyCaption)
+                        } else {
+                            Color.clear.frame(maxWidth: .infinity).frame(height: 1)
+                        }
+                    }
+                }
             }
         }
     }

@@ -352,11 +352,15 @@ final class UsageStore {
         guard let acc = accounts.first(where: { $0.number == target && $0.provider == "claude" }) else { return }
         lastAutoSwitchAt = Date()   // prevent re-entry while the async switch runs
         CbarLog.write("auto-switch triggered → #\(target) \(acc.email) (\(reason))")
+        let notify = cfg.notifyOnSwitch, why = reason
         enqueue(mutation: true) { [weak self] in
             guard let self else { return }
             do {
                 try self.switcher.switchTo(target)
                 CbarLog.write("auto-switch OK → #\(target)")
+                if notify {
+                    SwitchNotifier.shared.post(title: "cbar switched Claude to \(acc.email)", body: why)
+                }
             } catch {
                 // Keep the cooldown: resetting it here turned one failure into
                 // a 5+/sec retry storm (2026-07-10) that kept corrupting the
@@ -380,14 +384,24 @@ final class UsageStore {
         let pct = active.flatMap(codexSwitchMeter).map { "\($0.id)=\(Int($0.pct))%" } ?? "?"
         lastCodexSwitchAt = Date()
         CbarLog.write("codex auto-switch triggered #\(active?.number ?? 0) (\(pct)) → #\(target)")
+        let notify = config.notifyOnSwitch
+        let name = accounts.first { $0.provider == "codex" && $0.number == target }?.email ?? "#\(target)"
         enqueue(mutation: true) { [weak self] in
             guard let self else { return }
             do {
                 try self.codexSwitcher.switchTo(target)
                 if CodexLive.daemonRunning() {
                     CbarLog.write("codex auto-switch wrote #\(target) to auth.json, but the app-server daemon is running — NOT applied until it restarts")
+                    if notify {
+                        SwitchNotifier.shared.post(title: "cbar set Codex to \(name)",
+                                                   body: "The Codex daemon is running and keeps its account until it restarts.")
+                    }
                 } else {
                     CbarLog.write("codex auto-switch OK → #\(target) (new codex sessions only)")
+                    if notify {
+                        SwitchNotifier.shared.post(title: "cbar switched Codex to \(name)",
+                                                   body: "\(pct) on the previous account. Applies to the next codex you start.")
+                    }
                 }
             } catch {
                 CbarLog.write("codex auto-switch FAILED → #\(target): \(error) (retry after cooldown)")

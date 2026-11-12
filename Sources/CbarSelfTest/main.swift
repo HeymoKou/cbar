@@ -1396,6 +1396,15 @@ assert(!seeded.codexAutoSwitchEnabled, "seeded file carries codexAutoSwitchEnabl
 assert(!edited.codexAutoSwitchEnabled, "absent from an existing config → stays off on upgrade")
 assert(seeded.menuBarPercent && CbarConfig().menuBarPercent, "menu-bar percent defaults on, and is seeded")
 assert(edited.menuBarPercent, "absent from an existing config → on, without rewriting the file")
+assert(seededRaw["notifyOnSwitch"] as? Bool == true && edited.notifyOnSwitch, "switch notifications default on, seeded and for an existing config")
+
+// Card layout: up to three meters share a row; past that the plain windows lead
+// and the rest follow, or pools pair up when there is no plain window.
+assert(meterRows([]).isEmpty && meterRows(["5h", "7d", "Fbl"]) == [[0, 1, 2]], "three or fewer: one row, as before")
+assert(meterRows(["5h", "7d", "Spark 5h", "Spark 7d"]) == [[0, 1], [2, 3, nil]], "plain windows first, the rest padded to three columns")
+assert(meterRows(["Gem 5h", "Gem 7d", "Cl 5h", "Cl 7d"]) == [[0, 1], [2, 3]], "no plain window: pools pair up")
+assert(meterRows(["Gem 5h", "Gem 7d", "Cl 5h", "Cl 7d", "X"]) == [[0, 1], [2, 3], [4, nil]], "an odd one out keeps a half-width cell")
+print("METER ROWS OK")
 try! Data("{\"codexAutoSwitchEnabled\":true}".utf8).write(to: URL(fileURLWithPath: seededPath))
 assert(CbarConfig.load(dir: cfgDir).codexAutoSwitchEnabled, "codexAutoSwitchEnabled: true is honored")
 // UI setting writes preserve unrelated values and round-trip independently.

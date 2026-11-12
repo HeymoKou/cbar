@@ -71,7 +71,8 @@ as it is the active one. The 93% / 99% escape below still applies.
 
 Click the status pill in the popover's header (`AUTO 93% · WARM`) to open the
 settings: switches for **Claude auto-switch**, **Claude pre-warm**, **Codex
-auto-switch** and **Percent in the menu bar**. Changes are saved immediately to
+auto-switch**, **Percent in the menu bar** and **Notify when cbar switches on
+its own**. Changes are saved immediately to
 the config file and survive restarts. Pre-warm switches Claude accounts
 independently; turn both Claude controls off to stop automatic Claude switching.
 
@@ -172,6 +173,7 @@ can change without notice, same disclaimer as Claude and Codex.
   "autoSwitchThreshold": 93,
   "codexAutoSwitchEnabled": false,
   "menuBarPercent": true,
+  "notifyOnSwitch": true,
   "preWarmEnabled": true
 }
 ```
@@ -187,6 +189,13 @@ the key to `false` instead. Every decision is logged: `tail -f ~/.cbar/cbar.log`
   when the account needs a re-login; `"menuBarPercent": false` hides it. Hover
   for the account and its highest usage, or the last error. In the popover a bar turns
   red at 99%, and an account's data dims once it is over 10 min old.
+- **Notifications.** An automatic switch (escape, pre-warm, Codex) posts a
+  system notification naming the account and the reason; a switch you click
+  does not. macOS asks for permission the first time one is due.
+  `"notifyOnSwitch": false` turns them off.
+- **Cards with many meters** put the 5h / 7d windows on the first row and
+  model-specific allowances below them; pooled cards (Antigravity) pair each
+  pool's two windows.
 - **Rate limits.** The usage endpoint's budget is client-wide, not per-account,
   so each 60 s poll fetches exactly one account — the stalest. Backoff is
   per-account and honors `Retry-After`.

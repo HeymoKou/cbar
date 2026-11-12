@@ -14,6 +14,12 @@ struct ScanMeter: View {
     let numberColor: Color
     var threshold: Double? = nil
     var stale = false
+    /// A meter below the first row: same parts, smaller number.
+    var compact = false
+    /// Whether the caption line takes its space when this meter has none. Set
+    /// per row: a row where some meter has a countdown keeps every bar on one
+    /// line, and a row where none does drops the line instead of printing "—".
+    var reservesCaption = true
 
     private var clamped: Double { min(max(pct, 0), 100) }
     private var hot: Bool { pct >= 99 }
@@ -30,7 +36,7 @@ struct ScanMeter: View {
                     .foregroundStyle(stale ? Noct.ink5 : Noct.ink4)
                 Spacer(minLength: 2)
                 Text("\(Int(pct.rounded()))")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: compact ? 13 : 15, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(stale ? Noct.ink4 : (hot ? Noct.critText : numberColor))
             }
@@ -50,11 +56,14 @@ struct ScanMeter: View {
                 }
             }
             .frame(height: 5)
-            Text(caption ?? "—")
-                .font(.system(size: 12))
-                .monospacedDigit()
-                .foregroundStyle(captionColor ?? (stale ? Noct.ink5 : Noct.ink4))
-                .lineLimit(1)
+            if caption != nil || reservesCaption {
+                Text(caption ?? " ")
+                    .font(.system(size: compact ? 11 : 12))
+                    .monospacedDigit()
+                    .foregroundStyle(captionColor ?? (stale ? Noct.ink5 : Noct.ink4))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // One element, read as "5h, 42 percent, resets in 1h 15m": the parts

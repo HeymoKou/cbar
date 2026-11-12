@@ -35,6 +35,11 @@ public struct CbarConfig {
     /// display preference only; off leaves the bare glyph.
     public var menuBarPercent: Bool = true
 
+    /// A system notification when cbar switches an account ON ITS OWN. A switch
+    /// you clicked is not announced: you were there. Without this the only
+    /// record of an automatic one was a line in the log.
+    public var notifyOnSwitch: Bool = true
+
     /// Defaults, for holding a value before the first poll has read the file.
     public init() {}
 
@@ -59,6 +64,7 @@ public struct CbarConfig {
             "preWarmEnabled": d.preWarmEnabled,
             "codexAutoSwitchEnabled": d.codexAutoSwitchEnabled,
             "menuBarPercent": d.menuBarPercent,
+            "notifyOnSwitch": d.notifyOnSwitch,
         ]
         guard let json = try? JSONSerialization.data(withJSONObject: o,
                                                      options: [.prettyPrinted, .sortedKeys]),
@@ -76,6 +82,7 @@ public struct CbarConfig {
         case codex = "codexAutoSwitchEnabled"
         case preWarm = "preWarmEnabled"
         case menuBarPercent = "menuBarPercent"
+        case notify = "notifyOnSwitch"
     }
 
     public func isEnabled(_ setting: SwitchSetting) -> Bool {
@@ -84,6 +91,7 @@ public struct CbarConfig {
         case .codex: return codexAutoSwitchEnabled
         case .preWarm: return preWarmEnabled
         case .menuBarPercent: return menuBarPercent
+        case .notify: return notifyOnSwitch
         }
     }
 
@@ -117,6 +125,7 @@ public struct CbarConfig {
         if let p = o["preWarmEnabled"] as? Bool { c.preWarmEnabled = p }
         if let x = o["codexAutoSwitchEnabled"] as? Bool { c.codexAutoSwitchEnabled = x }
         if let m = o["menuBarPercent"] as? Bool { c.menuBarPercent = m }
+        if let n = o["notifyOnSwitch"] as? Bool { c.notifyOnSwitch = n }
         return c
     }
 }
