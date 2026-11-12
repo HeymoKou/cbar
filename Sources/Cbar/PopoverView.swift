@@ -226,7 +226,7 @@ struct PopoverView: View {
                            switchMeter: codex ? (codexSwitchMeter(acc)?.id ?? "5h") : "5h",
                            isNextTarget: isNext,
                            canSwitch: canSwitch,
-                           busy: store.busy,
+                           busy: store.mutating,
                            switchAction: { store.switchTo(acc) },
                            removeAction: canRemove ? { store.remove(acc) } : nil)
     }
@@ -282,7 +282,9 @@ struct PopoverView: View {
         if auto && warm { text = "AUTO \(Int(store.config.autoSwitchThreshold))% · WARM" }
         else if auto { text = "AUTO ON · \(Int(store.config.autoSwitchThreshold))%" }
         else if warm { text = "PRE-WARM ON" }
-        else { text = "\(claudeAccounts.count) ACCOUNT\(claudeAccounts.count == 1 ? "" : "S")" }
+        // Not an account count: the header beside it already counts every card,
+        // and a second number that counted only Claude read as a disagreement.
+        else { text = "AUTO OFF" }
         // Filled while the settings are open, washed on hover — the only cues
         // that it is a control, since a chevron would not fit the header.
         let wash: Color = showSettings ? (armed ? Noct.accentFill : Color.primary.opacity(0.08))
@@ -418,7 +420,7 @@ struct PopoverView: View {
                     .foregroundStyle(Noct.ink3)
                 }
             }
-            .disabled(store.busy)
+            .disabled(store.mutating)
             .padding(.top, 5)
             .padding(.leading, -9)   // pull the buttons' own padding back to the text edge
         }
@@ -444,7 +446,7 @@ struct PopoverView: View {
                 .overlay(canSwitchToBest
                          ? RoundedRectangle(cornerRadius: 7).stroke(Noct.accentLine, lineWidth: 1)
                          : nil)
-                .disabled(!canSwitchToBest || store.busy)
+                .disabled(!canSwitchToBest || store.mutating)
                 Spacer(minLength: 4)
                 // Menus, not a button each: five buttons crowded one 400pt row.
                 // Opening one is a local event, so the panel's outside-click
@@ -464,7 +466,7 @@ struct PopoverView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(Noct.ink3)
                 .padding(.horizontal, 6)
-                .disabled(store.busy)
+                .disabled(store.mutating)
                 Menu {
                     Button("Quit cbar") { NSApp.terminate(nil) }
                 } label: {

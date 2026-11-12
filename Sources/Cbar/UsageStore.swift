@@ -21,6 +21,11 @@ final class UsageStore {
     /// Something is queued or running on `work`: the panel spins Refresh and
     /// holds the buttons that would queue more behind it.
     var busy: Bool { pendingJobs > 0 }
+    /// The subset that rewrites something — a switch, an add, a remove, and the
+    /// refresh each hands off to. Only these hold the buttons: holding them for
+    /// every poll made the whole panel blink once a minute.
+    private var pendingMutations = 0
+    var mutating: Bool { pendingMutations > 0 }
 
     var onUpdate: (() -> Void)?
 
@@ -70,7 +75,7 @@ final class UsageStore {
     /// message, no log line, and no visible change, so the only symptom was the
     /// menu not doing anything.
     private func mutate(_ what: String, _ body: @escaping () throws -> Void) {
-        enqueue { [weak self] in
+        enqueue(mutation: true) { [weak self] in
             var err: String?
             do { try body() } catch {
                 // Words for the banner; the raw form, which names the type and
@@ -81,22 +86,24 @@ final class UsageStore {
             // Hand the message to the refresh rather than setting it here: the
             // refresh that follows every mutation assigns `lastError` itself, so
             // setting it first just means the user never sees it.
-            self?.refresh(carrying: err)
+            self?.refresh(carrying: err, afterMutation: true)
         }
     }
 
     /// Every job goes on `work` through here, so `busy` sees it from the moment
     /// it is queued. Callable from any thread; the count only moves on main.
-    private func enqueue(_ job: @escaping () -> Void) {
-        if Thread.isMainThread { pendingJobs += 1 } else {
-            DispatchQueue.main.async { [weak self] in self?.pendingJobs += 1 }
+    private func enqueue(mutation: Bool = false, _ job: @escaping () -> Void) {
+        let count = { [weak self] (d: Int) in
+            self?.pendingJobs += d
+            if mutation { self?.pendingMutations += d }
         }
+        if Thread.isMainThread { count(1) } else { DispatchQueue.main.async { count(1) } }
         work.async { [weak self] in
             job()
             // Lands after anything `job` put on main — the UI update, and a
             // follow-up refresh's own +1 — so the count never dips to zero
             // between a mutation and the refresh it hands off to.
-            DispatchQueue.main.async { self?.pendingJobs -= 1 }
+            DispatchQueue.main.async { count(-1) }
         }
     }
 
@@ -264,8 +271,8 @@ final class UsageStore {
     /// `carrying` is a mutation's failure message, which outranks anything the
     /// refresh itself hits — the user clicked a thing and it didn't work, and
     /// that is what they need told. Cleared by the next ordinary poll.
-    func refresh(carrying: String? = nil) {
-        enqueue { [weak self] in
+    func refresh(carrying: String? = nil, afterMutation: Bool = false) {
+        enqueue(mutation: afterMutation) { [weak self] in
             guard let self else { return }
             var accs: [Account] = []
             var err: String? = carrying
@@ -345,7 +352,7 @@ final class UsageStore {
         guard let acc = accounts.first(where: { $0.number == target && $0.provider == "claude" }) else { return }
         lastAutoSwitchAt = Date()   // prevent re-entry while the async switch runs
         CbarLog.write("auto-switch triggered → #\(target) \(acc.email) (\(reason))")
-        enqueue { [weak self] in
+        enqueue(mutation: true) { [weak self] in
             guard let self else { return }
             do {
                 try self.switcher.switchTo(target)
@@ -356,7 +363,7 @@ final class UsageStore {
                 // live login and rotated the log over its own evidence.
                 CbarLog.write("auto-switch FAILED → #\(target): \(error) (retry after cooldown)")
             }
-            self.refresh()
+            self.refresh(afterMutation: true)
         }
     }
 
@@ -373,7 +380,7 @@ final class UsageStore {
         let pct = active.flatMap(codexSwitchMeter).map { "\($0.id)=\(Int($0.pct))%" } ?? "?"
         lastCodexSwitchAt = Date()
         CbarLog.write("codex auto-switch triggered #\(active?.number ?? 0) (\(pct)) → #\(target)")
-        enqueue { [weak self] in
+        enqueue(mutation: true) { [weak self] in
             guard let self else { return }
             do {
                 try self.codexSwitcher.switchTo(target)
@@ -385,7 +392,7 @@ final class UsageStore {
             } catch {
                 CbarLog.write("codex auto-switch FAILED → #\(target): \(error) (retry after cooldown)")
             }
-            self.refresh()
+            self.refresh(afterMutation: true)
         }
     }
 
