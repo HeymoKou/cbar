@@ -389,33 +389,13 @@ public final class AntigravityUsageService {
         self.oauthClient = oauthClient; self.cachePath = cachePath
     }
 
-    struct Row: Codable {
-        var meters: [Meter] = []
-        var fetchedAt: Double? = nil
-        var resetsAt: Double? = nil
-        var lastAttemptAt: Double? = nil
-        var backoffUntil: Double? = nil
-        var failures: Int = 0
-        var lastError: String? = nil
-        var needsReauth: Bool = false
-        var plan: String? = nil
-        var email: String? = nil
-    }
-
-    private func loadCache() -> Row? {
-        guard let d = try? Data(contentsOf: URL(fileURLWithPath: cachePath)) else { return nil }
-        return try? JSONDecoder().decode(Row.self, from: d)
-    }
-    private func saveCache(_ row: Row) {
-        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let d = try? enc.encode(row) else { return }
-        try? SecureFile.write(d, to: cachePath)
-    }
+    typealias Row = UsageRow
+    private func loadCache() -> Row? { UsageRow.load(cachePath) }
+    private func saveCache(_ row: Row) { row.save(to: cachePath) }
 
     public func accounts(now: Double = Date().timeIntervalSince1970) -> [Account] {
         guard let live = creds() else { return [] }
         var row = loadCache() ?? Row()
-        row.email = live.email
         if let b = row.backoffUntil, now < b {
             return [account(live, row, now: now)]
         }
@@ -433,28 +413,25 @@ public final class AntigravityUsageService {
         }
 
         do {
-            try fetch(token: token, live: live, row: &row, now: now)
+            try fetch(token: token, row: &row, now: now)
         } catch OAuthError.http(401, retryAfter: _) {
             if let next = tryRefresh(live), next != token {
                 do {
-                    try fetch(token: next, live: live, row: &row, now: now)
+                    try fetch(token: next, row: &row, now: now)
                 } catch {
-                    applyFetchError(error, to: &row, now: now)
+                    row.record(error, now: now, log: "antigravity fetch", revokedBy: [])
                 }
             } else {
-                row.needsReauth = true; row.meters = []
-                row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                row.lastError = "unauthorized"
+                row.record(OAuthError.http(401, retryAfter: nil), now: now, log: "antigravity fetch")
             }
         } catch {
-            applyFetchError(error, to: &row, now: now)
+            row.record(error, now: now, log: "antigravity fetch", revokedBy: [])
         }
         saveCache(row)
         return [account(live, row, now: now)]
     }
 
-    private func fetch(token: String, live: AntigravityCreds, row: inout Row, now: Double) throws {
+    private func fetch(token: String, row: inout Row, now: Double) throws {
         let load = try? client.loadCodeAssist(accessToken: token)
         row.plan = load.flatMap { AntigravityUsageMapper.plan(from: $0) }
         do {
@@ -465,7 +442,7 @@ public final class AntigravityUsageService {
                 row.meters = meters
                 row.resetsAt = AntigravityUsageMapper.soonestReset(from: quota)
                 row.fetchedAt = now; row.failures = 0; row.backoffUntil = nil
-                row.needsReauth = false; row.lastError = nil; row.email = live.email
+                row.needsReauth = false; row.lastError = nil
                 return
             }
         } catch OAuthError.http(403, retryAfter: _), OAuthError.http(400, retryAfter: _) {
@@ -476,7 +453,7 @@ public final class AntigravityUsageService {
         row.meters = try AntigravityUsageMapper.metersFromModels(from: models, now: now)
         row.resetsAt = AntigravityUsageMapper.soonestResetFromModels(models)
         row.fetchedAt = now; row.failures = 0; row.backoffUntil = nil
-        row.needsReauth = false; row.lastError = nil; row.email = live.email
+        row.needsReauth = false; row.lastError = nil
     }
 
     private func tryRefresh(_ live: AntigravityCreds) -> String? {
@@ -490,27 +467,6 @@ public final class AntigravityUsageService {
         } catch {
             return nil
         }
-    }
-
-    private func applyFetchError(_ error: Error, to row: inout Row, now: Double) {
-        if case OAuthError.http(429, let ra) = error {
-            row.failures += 1
-            let wait = backoff(failures: row.failures, retryAfter: ra)
-            row.backoffUntil = now + wait
-            row.lastError = "rate limited"
-            CbarLog.write("antigravity fetch 429 — retry-after=\(ra.map { String(Int($0)) } ?? "-") failures=\(row.failures) backoff=\(Int(wait))s")
-            return
-        }
-        if case OAuthError.needsReauth = error {
-            row.needsReauth = true; row.meters = []
-            row.failures += 1
-            row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-            row.lastError = "needs re-login"
-            return
-        }
-        row.failures += 1
-        row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-        row.lastError = "\(error)"
     }
 
     private func account(_ live: AntigravityCreds, _ row: Row, now: Double) -> Account {

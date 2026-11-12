@@ -240,27 +240,9 @@ public final class GrokUsageService {
         self.cachePath = cachePath; self.grokRunning = grokRunning
     }
 
-    struct Row: Codable {
-        var meters: [Meter] = []
-        var fetchedAt: Double? = nil
-        var resetsAt: Double? = nil
-        var lastAttemptAt: Double? = nil
-        var backoffUntil: Double? = nil
-        var failures: Int = 0
-        var lastError: String? = nil
-        var needsReauth: Bool = false
-        var plan: String? = nil
-    }
-
-    private func loadCache() -> Row? {
-        guard let d = try? Data(contentsOf: URL(fileURLWithPath: cachePath)) else { return nil }
-        return try? JSONDecoder().decode(Row.self, from: d)
-    }
-    private func saveCache(_ row: Row) {
-        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let d = try? enc.encode(row) else { return }
-        try? SecureFile.write(d, to: cachePath)
-    }
+    typealias Row = UsageRow
+    private func loadCache() -> Row? { UsageRow.load(cachePath) }
+    private func saveCache(_ row: Row) { row.save(to: cachePath) }
 
     public static func grokRunning() -> Bool {
         UsageService.pgrepMatches(["-x", "grok"])
@@ -299,17 +281,8 @@ public final class GrokUsageService {
                                   refreshToken: r.refresh ?? login.refreshToken,
                                   expiresAt: exp, email: login.email, clientID: login.clientID)
                 row.needsReauth = false
-            } catch OAuthError.needsReauth {
-                row.needsReauth = true; row.meters = []
-                row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                row.lastError = "needs re-login"
-                saveCache(row)
-                return [account(login, row, now: now)]
             } catch {
-                row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                row.lastError = "refresh: \(error)"
+                row.record(error, now: now, log: "grok refresh")
                 saveCache(row)
                 return [account(login, row, now: now)]
             }
@@ -322,21 +295,8 @@ public final class GrokUsageService {
             row.plan = GrokUsageMapper.plan(from: data)
             row.fetchedAt = now; row.failures = 0; row.backoffUntil = nil
             row.needsReauth = false; row.lastError = nil
-        } catch OAuthError.http(401, _), OAuthError.http(403, _) {
-            row.needsReauth = true; row.meters = []
-            row.failures += 1
-            row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-            row.lastError = "unauthorized"
-        } catch OAuthError.http(429, let ra) {
-            row.failures += 1
-            let wait = backoff(failures: row.failures, retryAfter: ra)
-            row.backoffUntil = now + wait
-            row.lastError = "rate limited"
-            CbarLog.write("grok fetch 429 — retry-after=\(ra.map { String(Int($0)) } ?? "-") failures=\(row.failures) backoff=\(Int(wait))s")
         } catch {
-            row.failures += 1
-            row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-            row.lastError = "\(error)"
+            row.record(error, now: now, log: "grok fetch")
         }
         saveCache(row)
         return [account(login, row, now: now)]

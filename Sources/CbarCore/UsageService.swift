@@ -15,31 +15,9 @@ public final class UsageService {
         self.store = store; self.oauth = oauth; self.cachePath = cachePath
     }
 
-    struct Row: Codable {
-        var meters: [Meter] = []
-        var fetchedAt: Double? = nil
-        /// Soonest absolute reset (epoch) across this row's windows — the scheduler
-        /// hot-reloads once `now` passes it. Absent on rows written before it
-        /// existed or with no reset time; then hot-reload simply doesn't fire.
-        var resetsAt: Double? = nil
-        var lastAttemptAt: Double? = nil
-        var backoffUntil: Double? = nil
-        var failures: Int = 0
-        var lastError: String? = nil
-        var needsReauth: Bool = false
-    }
-
-    private func loadCache() -> [Int: Row] {
-        guard let d = try? Data(contentsOf: URL(fileURLWithPath: cachePath)),
-              let raw = try? JSONDecoder().decode([String: Row].self, from: d) else { return [:] }
-        return Dictionary(uniqueKeysWithValues: raw.compactMap { k, v in Int(k).map { ($0, v) } })
-    }
-    private func saveCache(_ c: [Int: Row]) {
-        let raw = Dictionary(uniqueKeysWithValues: c.map { (String($0.key), $0.value) })
-        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let d = try? enc.encode(raw) else { return }
-        try? SecureFile.write(d, to: cachePath)
-    }
+    typealias Row = UsageRow
+    private func loadCache() -> [Int: Row] { UsageRow.loadSlots(cachePath) }
+    private func saveCache(_ c: [Int: Row]) { UsageRow.saveSlots(c, to: cachePath) }
 
     /// Creds to fetch with: the LIVE keychain for the slot the live token is
     /// PROFILE-VERIFIED to belong to (CC keeps it fresh; the slot copy goes
@@ -212,22 +190,11 @@ public final class UsageService {
                             row.lastError = "creds write failed"; cache[n] = row; continue
                         }
                         row.needsReauth = false
-                    } catch OAuthError.needsReauth {
-                        // Back off a dead slot like any other failure. Without this
-                        // its `fetchedAt` never advances, so it stays the STALEST row
-                        // forever and wins every `fetchPlan` pass that the active slot
-                        // doesn't preempt — starving healthy alternates of refreshes
-                        // (a needs-reauth #1 kept #2 at 20 min stale, blocking it as a
-                        // switch/pre-warm target, 2026-08-27). A real re-login clears
-                        // this via `credsChanged`, so recovery is unaffected.
-                        row.needsReauth = true; row.meters = []
-                        row.failures += 1
-                        row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                        row.lastError = "needs re-login"; cache[n] = row; continue
                     } catch {
-                        row.failures += 1
-                        row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                        row.lastError = "refresh: \(error)"; cache[n] = row; continue
+                        // A dead refresh token backs off like any other failure (see
+                        // `UsageRow.record`). A real re-login clears it via
+                        // `credsChanged`, so recovery is unaffected.
+                        row.record(error, now: now, log: "refresh #\(n)"); cache[n] = row; continue
                     }
                 }
             }
@@ -242,28 +209,10 @@ public final class UsageService {
                 // stays "needs-reauth" (red, and barred from switching) until cbar
                 // happens to perform a refresh of its own.
                 row.needsReauth = false
-            } catch OAuthError.http(401, _), OAuthError.http(403, _) {
-                // Not transient: an expired token was already refreshed above, so a
-                // 401/403 here means the credential was revoked. Demote instead of
-                // serving the last-good meters as live — they stayed selectable as a
-                // switch target for the whole freshness window.
-                row.needsReauth = true; row.meters = []
-                row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                row.lastError = "unauthorized"
-            } catch OAuthError.http(429, let ra) {
-                row.failures += 1
-                let wait = backoff(failures: row.failures, retryAfter: ra)
-                row.backoffUntil = now + wait
-                row.lastError = "rate limited"
-                // The only durable record of pacing pressure: `lastError` lives in
-                // the cache and is overwritten next pass, so without this there is
-                // no way to tell whether a pacing change worked (2026-07-25).
-                CbarLog.write("fetch #\(n) 429 — retry-after=\(ra.map { String(Int($0)) } ?? "-") failures=\(row.failures) backoff=\(Int(wait))s")
             } catch {
-                row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                row.lastError = "\(error)"
+                // An expired token was already refreshed above, so a 401/403 here
+                // means the credential was revoked (see `UsageRow.record`).
+                row.record(error, now: now, log: "fetch #\(n)")
             }
             cache[n] = row
         }
@@ -339,5 +288,89 @@ public final class UsageService {
             return true
         }
         return p.terminationStatus == 0
+    }
+}
+
+/// One account's cached usage and failure history — the same shape for every
+/// provider, so a failure is recorded one way everywhere.
+struct UsageRow: Codable {
+    var meters: [Meter] = []
+    var fetchedAt: Double? = nil
+    /// Soonest absolute reset (epoch) across this row's windows — the scheduler
+    /// hot-reloads once `now` passes it. Absent on rows written before it
+    /// existed or with no reset time; then hot-reload simply doesn't fire.
+    var resetsAt: Double? = nil
+    var lastAttemptAt: Double? = nil
+    var backoffUntil: Double? = nil
+    var failures: Int = 0
+    var lastError: String? = nil
+    var needsReauth: Bool = false
+    /// Grok / Antigravity plan name; never set (so never written) for Claude or Codex.
+    var plan: String? = nil
+
+    /// A failed refresh or fetch. Every failure backs off, a dead credential
+    /// included: without that its `fetchedAt` never advances, it stays the
+    /// STALEST row forever and wins every `fetchPlan` pass — a needs-reauth #1
+    /// kept #2 at 20 min stale, blocking it as a switch target (2026-08-27).
+    ///
+    /// `revokedBy`: statuses that mean the credential is gone. Demote instead of
+    /// serving the last-good meters as live — they stayed selectable as a switch
+    /// target for the whole freshness window. Antigravity passes none: its 403 is
+    /// a licence answer, not a revoked token.
+    mutating func record(_ error: Error, now: Double, log: String, revokedBy: Set<Int> = [401, 403]) {
+        failures += 1
+        var retryAfter: Double?
+        switch error {
+        case OAuthError.needsReauth:
+            needsReauth = true; meters = []; lastError = "needs re-login"
+        case OAuthError.http(let code, _) where revokedBy.contains(code):
+            needsReauth = true; meters = []; lastError = "unauthorized"
+        case OAuthError.http(429, let ra):
+            retryAfter = ra; lastError = "rate limited"
+        default:
+            lastError = Self.describe(error)
+        }
+        let wait = backoff(failures: failures, retryAfter: retryAfter)
+        backoffUntil = now + wait
+        if case OAuthError.http(429, let ra) = error {
+            // The only durable record of pacing pressure: `lastError` is
+            // overwritten next pass, so without this there is no way to tell
+            // whether a pacing change worked (2026-07-25).
+            CbarLog.write("\(log) 429 — retry-after=\(ra.map { String(Int($0)) } ?? "-") failures=\(failures) backoff=\(Int(wait))s")
+        }
+    }
+
+    /// What the card says about a failure, in words — it used to be Swift's
+    /// debug print of the error (`http(500, retryAfter: nil)`).
+    static func describe(_ error: Error) -> String {
+        switch error {
+        case OAuthError.http(let code, _): return "server error (HTTP \(code))"
+        case OAuthError.transient: return "token refresh failed, will retry"
+        case OAuthError.network: return "network unreachable"
+        case OAuthError.badResponse: return "unexpected response from the server"
+        default: return "request failed"
+        }
+    }
+
+    static func load(_ path: String) -> UsageRow? {
+        guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? JSONDecoder().decode(UsageRow.self, from: d)
+    }
+    func save(to path: String) { Self.write(self, to: path) }
+
+    /// Slot-numbered cache (Claude, Codex): JSON keys are the slot numbers.
+    static func loadSlots(_ path: String) -> [Int: UsageRow] {
+        guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let raw = try? JSONDecoder().decode([String: UsageRow].self, from: d) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: raw.compactMap { k, v in Int(k).map { ($0, v) } })
+    }
+    static func saveSlots(_ c: [Int: UsageRow], to path: String) {
+        write(Dictionary(uniqueKeysWithValues: c.map { (String($0.key), $0.value) }), to: path)
+    }
+
+    private static func write<T: Encodable>(_ v: T, to path: String) {
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let d = try? enc.encode(v) else { return }
+        try? SecureFile.write(d, to: path)
     }
 }

@@ -171,19 +171,9 @@ public final class CodexUsageService {
         self.store = store; self.client = client; self.cachePath = cachePath; self.home = home
     }
 
-    typealias Row = UsageService.Row
-
-    private func loadCache() -> [Int: Row] {
-        guard let d = try? Data(contentsOf: URL(fileURLWithPath: cachePath)),
-              let raw = try? JSONDecoder().decode([String: Row].self, from: d) else { return [:] }
-        return Dictionary(uniqueKeysWithValues: raw.compactMap { k, v in Int(k).map { ($0, v) } })
-    }
-    private func saveCache(_ c: [Int: Row]) {
-        let raw = Dictionary(uniqueKeysWithValues: c.map { (String($0.key), $0.value) })
-        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let d = try? enc.encode(raw) else { return }
-        try? SecureFile.write(d, to: cachePath)
-    }
+    typealias Row = UsageRow
+    private func loadCache() -> [Int: Row] { UsageRow.loadSlots(cachePath) }
+    private func saveCache(_ c: [Int: Row]) { UsageRow.saveSlots(c, to: cachePath) }
 
     /// Whether refreshing slot `n`'s expired token must wait. Refreshing rotates,
     /// so cbar only does it for a token nothing else can be holding:
@@ -298,15 +288,8 @@ public final class CodexUsageService {
                     }
                     login = next
                     row.needsReauth = false
-                } catch OAuthError.needsReauth {
-                    row.needsReauth = true; row.meters = []
-                    row.failures += 1
-                    row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                    row.lastError = "needs re-login"; cache[n] = row; continue
                 } catch {
-                    row.failures += 1
-                    row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                    row.lastError = "refresh: \(error)"; cache[n] = row; continue
+                    row.record(error, now: now, log: "codex refresh #\(n)"); cache[n] = row; continue
                 }
             }
             do {
@@ -315,21 +298,8 @@ public final class CodexUsageService {
                 row.resetsAt = CodexUsageMapper.soonestReset(from: data)
                 row.fetchedAt = now; row.failures = 0; row.backoffUntil = nil; row.lastError = nil
                 row.needsReauth = false
-            } catch OAuthError.http(401, _), OAuthError.http(403, _) {
-                row.needsReauth = true; row.meters = []
-                row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                row.lastError = "unauthorized"
-            } catch OAuthError.http(429, let ra) {
-                row.failures += 1
-                let wait = backoff(failures: row.failures, retryAfter: ra)
-                row.backoffUntil = now + wait
-                row.lastError = "rate limited"
-                CbarLog.write("codex fetch #\(n) 429 — retry-after=\(ra.map { String(Int($0)) } ?? "-") failures=\(row.failures) backoff=\(Int(wait))s")
             } catch {
-                row.failures += 1
-                row.backoffUntil = now + backoff(failures: row.failures, retryAfter: nil)
-                row.lastError = "\(error)"
+                row.record(error, now: now, log: "codex fetch #\(n)")
             }
             cache[n] = row
         }

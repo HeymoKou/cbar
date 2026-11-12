@@ -1241,6 +1241,21 @@ do {
     _ = CodexUsageService(store: st, client: api, cachePath: cache, home: home).accounts(now: cxNow)
     assert(api.refreshedWith.isEmpty, "unusable live file → no refresh anywhere")
 }
+// 7. Failures read as sentences, not Swift's debug print of the error — and
+//    the slot cache file doesn't grow the Grok/Antigravity-only `plan` key.
+do {
+    let (st, home, cache) = svcFixture("words")
+    _ = try st.add(svcLogin("I", account: "acct-idle", exp: cxNow + 86_400))
+    let api = FakeCodexAPI(); api.fetchError = OAuthError.http(500, retryAfter: nil)
+    let svc = CodexUsageService(store: st, client: api, cachePath: cache, home: home)
+    assert(svc.accounts(now: cxNow).first?.status == "server error (HTTP 500)", "http status in words")
+    api.fetchError = OAuthError.network
+    assert(svc.accounts(now: cxNow + 4_000).first?.status == "network unreachable")
+    api.fetchError = OAuthError.http(429, retryAfter: 5)
+    assert(svc.accounts(now: cxNow + 8_000).first?.status == "rate limited", "kept: matched on elsewhere")
+    let raw = try! String(contentsOfFile: cache, encoding: .utf8)
+    assert(raw.contains("\"failures\" : 3") && !raw.contains("plan"), "failures counted once each, no plan key: \(raw)")
+}
 try? Keychain.delete(service: svcKC, account: CodexAccountStore.keyAccount)
 try? FileManager.default.removeItem(atPath: svcRoot)
 print("CODEX SERVICE OK")
