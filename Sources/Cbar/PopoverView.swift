@@ -398,14 +398,14 @@ struct PopoverView: View {
             Text("No accounts tracked yet")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Noct.ink2)
-            Text("Log into an account in Claude Code, then Claude. Repeat per account.")
+            Text("Log into an account in Claude Code, then click Add Claude account. Repeat for each account; Codex is under Add account below.")
                 .font(.system(size: 12))
                 .lineSpacing(4)
                 .foregroundStyle(Noct.ink4)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 4) {
                 Button { store.addCurrent() } label: {
-                    Label("Claude", systemImage: "plus.circle")
+                    Label("Add Claude account", systemImage: "plus.circle")
                 }
                 .buttonStyle(HoverButtonStyle(font: .system(size: 13)))
                 .foregroundStyle(Noct.accentText)
@@ -446,25 +446,38 @@ struct PopoverView: View {
                          : nil)
                 .disabled(!canSwitchToBest || store.busy)
                 Spacer(minLength: 4)
-                Button { store.addCurrent() } label: {
-                    Label("Claude", systemImage: "plus")
-                }
-                .foregroundStyle(Noct.ink3)
-                .disabled(store.busy)
-                Button { store.addCodexAccount() } label: {
-                    Label("Codex", systemImage: "plus")
-                }
-                .foregroundStyle(Noct.ink3)
-                .disabled(store.busy)
-                if store.canImportCswap {
-                    Button { store.importCswap() } label: {
-                        Label("cswap", systemImage: "square.and.arrow.down")
+                // Menus, not a button each: five buttons crowded one 400pt row.
+                // Opening one is a local event, so the panel's outside-click
+                // monitor (global, other apps only) leaves the panel up.
+                Menu {
+                    Button("Claude — current login") { store.addCurrent() }
+                    Button("Codex") { store.addCodexAccount() }
+                    if store.canImportCswap {
+                        Button("Import from cswap") { store.importCswap() }
                     }
-                    .foregroundStyle(Noct.ink3)
-                    .disabled(store.busy)
+                } label: {
+                    Label("Add account", systemImage: "plus")
                 }
-                Button { NSApp.terminate(nil) } label: { Text("Quit") }
-                    .foregroundStyle(Noct.ink3)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()   // a borderless menu otherwise takes all the width it is offered
+                .font(.system(size: 13))
+                .foregroundStyle(Noct.ink3)
+                .padding(.horizontal, 6)
+                .disabled(store.busy)
+                Menu {
+                    Button("Quit cbar") { NSApp.terminate(nil) }
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .font(.system(size: 13))
+                .foregroundStyle(Noct.ink3)
+                .padding(.horizontal, 6)
+                .help("More")
+                .accessibilityLabel("More")
             }
             Text(statusLine)
                 .font(.system(size: 12))
@@ -526,7 +539,7 @@ struct AccountCard: View {
     private var reauthHint: String {
         switch acc.provider {
         case "codex":
-            return acc.isActive ? "Re-login needed (run codex login)" : "Re-login needed (Add Codex)"
+            return acc.isActive ? "Re-login needed (run codex login)" : "Re-login needed (Add account › Codex)"
         case "grok": return "Re-login needed (run grok login)"
         case "antigravity": return "Re-login needed (run agy)"
         default: return "Re-login needed (run Claude Code login)"
