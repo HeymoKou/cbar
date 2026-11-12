@@ -358,3 +358,16 @@ public func preWarmMove(accounts: [Account], active: Int, target: Double = 5,
     }
     return nil
 }
+
+/// The Claude slot the user picked by hand, still held. Pre-warm stays off it
+/// while it is the live one: it used to move the login straight back within a
+/// couple of minutes, undoing the choice the moment the cooldown ran out. The
+/// escape (`autoSwitchTarget`) still applies — a blocked account must leave.
+///
+/// Dropped once a DIFFERENT slot is known to be live (an escape, a `/login`
+/// elsewhere); kept while the active slot is unknown, so one failed pass can't
+/// release it. A later manual switch simply sets a new pin.
+public func manualPin(_ pin: Int?, active: Int?) -> Int? {
+    guard let pin, let active, active != pin else { return pin }
+    return nil
+}

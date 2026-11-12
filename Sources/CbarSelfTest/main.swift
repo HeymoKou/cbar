@@ -760,6 +760,13 @@ assert(preWarmMove(accounts: [warm7d(1, active: true, fiveH: 60, sevenD: 20, age
 assert(preWarmMove(accounts: [warm7d(1, active: true, fiveH: 60, sevenD: 20, age: 601),
                               acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == nil, "active past 600s -> stay")
 
+// A hand-picked Claude slot holds off pre-warm while it is live, and only a
+// different live slot releases it — an unknown one (failed pass) does not.
+assert(manualPin(nil, active: 2) == nil, "nothing picked → nothing held")
+assert(manualPin(2, active: 2) == 2, "picked slot still live → held")
+assert(manualPin(2, active: nil) == 2, "active unknown this pass → still held")
+assert(manualPin(2, active: 1) == nil, "another slot went live (escape, /login) → released")
+
 // Refresh-token rotation guard. CC holding the same token, owning the slot,
 // pointing at it, or an unknowable identity all mean: do not rotate.
 func skip(_ n: Int, active: Int?, liveOwner: Int?, cc: Bool, slotRT: String?, liveRT: String?) -> Bool {

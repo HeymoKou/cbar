@@ -37,6 +37,8 @@ final class UsageStore {
     private var observers: [NSObjectProtocol] = []
     private let interval: TimeInterval = 60   // pacing gates the actual network hits
     private var lastAutoSwitchAt: Date?
+    /// Hand-picked Claude slot that pre-warm must leave alone (see `manualPin`).
+    private var manualClaudeSlot: Int?
     private let autoSwitchCooldown: TimeInterval = 120
     /// Display asleep, not the machine. Gates the timer tick rather than stopping
     /// it — see `pollsWhileDark`.
@@ -223,14 +225,17 @@ final class UsageStore {
     private func maybeAutoSwitch() {
         let cfg = CbarConfig.load()
         config = cfg          // publish before the guard: the header shows it either way
+        let activeClaude = accounts.first(where: { $0.isActive && $0.provider == "claude" })
+        manualClaudeSlot = manualPin(manualClaudeSlot, active: activeClaude?.number)
         // Before Claude's guard: Codex has its own switch, independent of Claude's two.
         if cfg.codexAutoSwitchEnabled { maybeAutoSwitchCodex(threshold: cfg.autoSwitchThreshold) }
         guard cfg.autoSwitchEnabled || cfg.preWarmEnabled else { return }
         // Observability: log the active account's switch-usage + decision each poll,
         // so it's visible in Console why auto-switch does or doesn't fire.
-        if let active = accounts.first(where: { $0.isActive && $0.provider == "claude" }) {
+        if let active = activeClaude {
             let err = active.meters.isEmpty ? " (no usage data — stale/rate-limited/expired token)" : ""
-            CbarLog.write("auto-switch check active #\(active.number) \(active.email) 5h=\(Int(switchPct(active)))% thr=\(Int(cfg.autoSwitchThreshold))% 7d=\(Int(sevenDayPct(active)))%/\(Int(sevenDayCeiling))%\(err)")
+            let held = manualClaudeSlot != nil ? " (picked by hand: no pre-warm)" : ""
+            CbarLog.write("auto-switch check active #\(active.number) \(active.email) 5h=\(Int(switchPct(active)))% thr=\(Int(cfg.autoSwitchThreshold))% 7d=\(Int(sevenDayPct(active)))%/\(Int(sevenDayCeiling))%\(err)\(held)")
         }
         // The 93%/exhaustion escape outranks pre-warm: leaving a blocked account is
         // mandatory, priming an idle one is opportunistic. Pre-warm only diverts
@@ -245,8 +250,8 @@ final class UsageStore {
         var reason = ""
         if cfg.autoSwitchEnabled, let t = autoSwitchTarget(accounts: accounts, threshold: cfg.autoSwitchThreshold) {
             target = t; reason = "active ≥ \(Int(cfg.autoSwitchThreshold))% or exhausted"
-        } else if cfg.preWarmEnabled, UsageService.claudeCodeRunning(),
-                  let active = accounts.first(where: { $0.isActive && $0.provider == "claude" })?.number,
+        } else if cfg.preWarmEnabled, manualClaudeSlot == nil, UsageService.claudeCodeRunning(),
+                  let active = activeClaude?.number,
                   let t = preWarmMove(accounts: accounts, active: active, escapeThreshold: cfg.autoSwitchThreshold) {
             let home = burnHome(accounts, escapeThreshold: cfg.autoSwitchThreshold)
             reason = t == home ? "pre-warm return to burn account" : "pre-warm excursion (open idle 5h)"
@@ -325,7 +330,13 @@ final class UsageStore {
         // reverse a hand-picked account a second later — the auto path only wrote
         // this timestamp itself, so a manual switch used to be fair game to undo.
         lastAutoSwitchAt = Date()
-        mutate("switch to #\(account.number)") { [switcher] in try switcher.switchTo(account.number) }
+        mutate("switch to #\(account.number)") { [weak self, switcher] in
+            try switcher.switchTo(account.number)
+            CbarLog.write("manual switch → #\(account.number) \(account.email)")
+            // Main, like every other read of it; queued ahead of the refresh
+            // `mutate` runs next, so that pass already sees the pin.
+            DispatchQueue.main.async { self?.manualClaudeSlot = account.number }
+        }
     }
 
     func switchToBest() {
