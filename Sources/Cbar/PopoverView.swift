@@ -604,7 +604,6 @@ struct AccountCard: View {
     /// comes back). Prefer `resetsAt` so the string is not a snapshot from fetch.
     private func caption(for m: Meter) -> String? {
         let remain = CodexProvider.countdown(m.resetsAt, now: Date().timeIntervalSince1970)
-            ?? m.countdown
         if let c = remain { return "reset in \(c)" }
         if m.id == switchMeter, acc.isActive, let t = threshold, m.pct >= t {
             return "over \(Int(t))%"

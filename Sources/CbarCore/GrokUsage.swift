@@ -143,32 +143,31 @@ public enum GrokUsageMapper {
         return num(cfg["creditUsagePercent"])
     }
 
-    public static func meters(from data: Data, now: Double = Date().timeIntervalSince1970) throws -> [Meter] {
+    public static func meters(from data: Data) throws -> [Meter] {
         guard let cfg = config(data) else { throw OAuthError.badResponse }
         let period = cfg["currentPeriod"] as? [String: Any]
         let type = ((period?["type"] as? String) ?? "").uppercased()
         let id = meterID(periodType: type)
         let endISO = (period?["end"] as? String) ?? (cfg["billingPeriodEnd"] as? String)
-        let countdown = endISO.flatMap(UsageMapper.parseISO)
-            .flatMap { CodexProvider.countdown($0.timeIntervalSince1970, now: now) }
+        let reset = endISO.flatMap(UsageMapper.parseISO)?.timeIntervalSince1970
 
         if let pct = num(cfg["creditUsagePercent"]) {
-            return [Meter(id: id, pct: clamp(pct), countdown: countdown)]
+            return [Meter(id: id, pct: clamp(pct), resetsAt: reset)]
         }
         // Monthly absolute, on the credits body or merged in from GET /billing.
         if let used = val(cfg["used"]) ?? val(cfg["totalUsed"]) ?? nestedUsed(cfg),
            let limit = val(cfg["monthlyLimit"]), limit > 0 {
-            return [Meter(id: id == "5h" ? "7d" : id, pct: clamp(used / limit * 100), countdown: countdown)]
+            return [Meter(id: id == "5h" ? "7d" : id, pct: clamp(used / limit * 100), resetsAt: reset)]
         }
         if let cap = val(cfg["onDemandCap"]), cap > 0 {
             let used = val(cfg["onDemandUsed"]) ?? 0
-            return [Meter(id: "OD", pct: clamp(used / cap * 100), countdown: countdown)]
+            return [Meter(id: "OD", pct: clamp(used / cap * 100), resetsAt: reset)]
         }
         // A credit window with nothing else to read: proto3 JSON drops a zero
         // `creditUsagePercent`, and the grok CLI's `/usage` reads that as 0%.
         // Last resort only — used/limit above wins whenever it exists.
         if !type.isEmpty {
-            return [Meter(id: id, pct: 0, countdown: countdown)]
+            return [Meter(id: id, pct: 0, resetsAt: reset)]
         }
         return []
     }
@@ -318,7 +317,7 @@ public final class GrokUsageService {
 
         do {
             let data = try client.fetchBillingRaw(accessToken: login.accessToken)
-            row.meters = try GrokUsageMapper.meters(from: data, now: now)
+            row.meters = try GrokUsageMapper.meters(from: data)
             row.resetsAt = GrokUsageMapper.soonestReset(from: data)
             row.plan = GrokUsageMapper.plan(from: data)
             row.fetchedAt = now; row.failures = 0; row.backoffUntil = nil

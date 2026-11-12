@@ -123,9 +123,7 @@ public enum CodexUsageMapper {
                 id = window
             }
             let reset = resetEpoch(w, now: now)
-            return Meter(id: id, pct: pct,
-                         countdown: CodexProvider.countdown(reset, now: now),
-                         resetsAt: reset)
+            return Meter(id: id, pct: pct, resetsAt: reset)
         }
     }
 

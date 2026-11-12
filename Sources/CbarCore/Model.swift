@@ -3,12 +3,12 @@ import Foundation
 public struct Meter: Identifiable, Sendable, Codable {
     public let id: String          // "5h" | "7d" | "Fbl" | other scoped name
     public let pct: Double
-    public let countdown: String?
-    /// Absolute reset (epoch seconds). Preferred over `countdown`, which is a
-    /// string baked at fetch and goes stale between polls.
+    /// Absolute reset (epoch seconds); the UI formats the countdown from it at
+    /// draw time. A string baked at fetch went stale between polls. Cache files
+    /// from older versions still carry a `countdown` key; decoding ignores it.
     public let resetsAt: Double?
-    public init(id: String, pct: Double, countdown: String?, resetsAt: Double? = nil) {
-        self.id = id; self.pct = pct; self.countdown = countdown; self.resetsAt = resetsAt
+    public init(id: String, pct: Double, resetsAt: Double? = nil) {
+        self.id = id; self.pct = pct; self.resetsAt = resetsAt
     }
 }
 

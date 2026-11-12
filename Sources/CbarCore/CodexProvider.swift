@@ -119,9 +119,7 @@ public final class CodexProvider {
                 let window = Self.windowLabel(w.window_minutes) ?? positional
                 let label = Self.meterLabel(limitID: bucket, limitName: rl.limit_name,
                                             window: window, hasSecondary: rl.secondary != nil)
-                return Meter(id: label, pct: w.used_percent ?? 0,
-                             countdown: countdown(w.resets_at, now: now),
-                             resetsAt: w.resets_at)
+                return Meter(id: label, pct: w.used_percent ?? 0, resetsAt: w.resets_at)
             }
             // A terminal reason-only snapshot (for example `premium` with both
             // windows null) must not shadow the last snapshot that measured it.

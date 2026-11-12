@@ -46,7 +46,7 @@ assert(cx!.provider == "codex" && cx!.switchable == false)
 assert(cx!.meters.count == 2)
 assert(Int(cx!.meters[0].pct) == 5 && cx!.meters[0].id == "5h")
 assert(Int(cx!.meters[1].pct) == 12 && cx!.meters[1].id == "7d")
-assert(cx!.meters[0].countdown == "1h 0m", "5h countdown: \(cx!.meters[0].countdown ?? "nil")")
+assert(CodexProvider.countdown(cx!.meters[0].resetsAt, now: 2000000000) == "1h 0m", "5h countdown from resetsAt")
 assert(cx!.meters[0].resetsAt == 2000003600, "session-file meters keep absolute reset")
 assert(cx!.org == "OpenAI · team")
 // Codex's post-2026-07-13 shape: one WEEKLY window in `primary`, `secondary`
@@ -280,11 +280,10 @@ assert(um[1].id == "7d" && Int(um[1].pct) == 71, "7d util")
 assert(um[2].id == "Fbl" && Int(um[2].pct) == 88, "scoped percent")
 assert(isExpired(expiresAt: 1000, now_ms: 800_000), "expired")
 assert(!isExpired(expiresAt: 10_000_000_000_000, now_ms: 1000), "not expired")
-// reset countdown: fractional-seconds resets_at must parse (was the "no reset time" bug)
+// reset time: fractional-seconds resets_at must parse (was the "no reset time" bug)
 let usageReset = #"{"five_hour":{"utilization":50.0,"resets_at":"2035-01-02T03:04:05.326186+00:00"}}"#
 let mr = try UsageMapper.meters(from: Data(usageReset.utf8))
-assert(mr.first?.countdown != nil, "fractional resets_at must yield a countdown (not nil)")
-assert(mr.first!.countdown!.contains("d"), "far-future reset → days countdown, got \(mr.first!.countdown!)")
+assert(mr.first?.resetsAt != nil, "fractional resets_at must yield a reset time (not nil)")
 let mrEpoch = ISO8601DateFormatter().date(from: "2035-01-02T03:04:05Z")!.timeIntervalSince1970
 assert(mr.first?.resetsAt.map { abs($0 - mrEpoch) < 1 } == true, "resets_at lands on the meter as an absolute time")
 assert(um.allSatisfy { $0.resetsAt == nil }, "null / missing resets_at -> no absolute reset")
@@ -317,6 +316,11 @@ assert(FileManager.default.fileExists(atPath: "\(purgeHome)/Library/Caches/other
 OAuthClient.purgeLegacyHTTPStorage(home: purgeHome)   // absent paths: harmless
 try? FileManager.default.removeItem(atPath: purgeHome)
 print("HTTP STORAGE OK")
+
+// Cache files written before `Meter.countdown` was removed carry the key;
+// Decodable ignores it, so an upgrade keeps its cached readings.
+let oldMeter = try JSONDecoder().decode(Meter.self, from: Data(#"{"id":"5h","pct":42,"countdown":"1h 2m","resetsAt":2000003600}"#.utf8))
+assert(oldMeter.id == "5h" && oldMeter.pct == 42 && oldMeter.resetsAt == 2000003600, "old cache row decodes")
 
 // AccountStore on throwaway dir + keychain service
 let storeDir = NSTemporaryDirectory() + "cbar-store-\(ProcessInfo.processInfo.processIdentifier)"
@@ -539,7 +543,7 @@ print("PACING OK (rotation over 60 passes: \(picks.sorted { $0.key < $1.key }.ma
 // Auto-switch target selection
 func mkAcc(_ n: Int, _ active: Bool, _ pct: Double, provider: String = "claude") -> Account {
     Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: "ok",
-            meters: [Meter(id: "5h", pct: pct, countdown: nil)], ageSeconds: 1, provider: provider)
+            meters: [Meter(id: "5h", pct: pct)], ageSeconds: 1, provider: provider)
 }
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10), mkAcc(3, false, 50)], threshold: 94) == 2, "switch to most headroom")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 50), mkAcc(2, false, 10)], threshold: 94) == nil, "below threshold -> no switch")
@@ -550,12 +554,12 @@ assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), mkAcc(2, false, 10, provi
 assert(mkAcc(1, false, 10, provider: "grok").switchable == false)
 assert(mkAcc(1, false, 10, provider: "antigravity").switchable == false)
 assert(Account(id: "g", number: 1, email: "g", org: "", isActive: true, status: "ok",
-               meters: [Meter(id: "7d", pct: 99, countdown: nil)], ageSeconds: 1, provider: "grok").switchable == false)
+               meters: [Meter(id: "7d", pct: 99)], ageSeconds: 1, provider: "grok").switchable == false)
 // Only the 5h window triggers. Fable and 7d are both excluded: the real
 // 2026-07-25 state was 5h=3% / 7d=91%, which wanted to rotate every poll off an
 // account with a nearly empty 5-hour window.
 let busy7d = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
-                     meters: [Meter(id: "5h", pct: 3, countdown: nil), Meter(id: "7d", pct: 91, countdown: nil), Meter(id: "Fbl", pct: 99, countdown: nil)],
+                     meters: [Meter(id: "5h", pct: 3), Meter(id: "7d", pct: 91), Meter(id: "Fbl", pct: 99)],
                      ageSeconds: 1, provider: "claude")
 assert(switchPct(busy7d) == 3, "switchPct is 5h only (ignores 7d and Fable)")
 assert(autoSwitchTarget(accounts: [busy7d, mkAcc(2, false, 5)], threshold: 93) == nil, "7d 91% / Fable 99% must not trigger when 5h is low")
@@ -565,7 +569,7 @@ assert(switchPct(mkAcc(1, true, 93)) == 93 && autoSwitchTarget(accounts: [mkAcc(
 // looks (slot #2: needs-reauth, 11-day-old 60%, picked 4× on 2026-07-25).
 func deadAcc(_ n: Int, _ pct: Double, status: String = "ok", age: Double? = 1, meters: [Meter]? = nil) -> Account {
     Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: false, status: status,
-            meters: meters ?? [Meter(id: "5h", pct: pct, countdown: nil)], ageSeconds: age, provider: "claude")
+            meters: meters ?? [Meter(id: "5h", pct: pct)], ageSeconds: age, provider: "claude")
 }
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 10, status: "needs-reauth")], threshold: 93) == nil, "needs-reauth is not a switch target")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 10, status: "no credentials")], threshold: 93) == nil, "no-credentials is not a switch target")
@@ -575,7 +579,7 @@ assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), deadAcc(2, 10, status: "n
 
 // status(): only fresh, real data is "ok" — slot #3 reported ok + 0% with no
 // keychain item and kept the icon green for 17 h (2026-07-25).
-let m5 = [Meter(id: "5h", pct: 3, countdown: nil)]
+let m5 = [Meter(id: "5h", pct: 3)]
 func st(_ meters: [Meter], _ fetchedAt: Double?, _ err: String?, reauth: Bool = false) -> String {
     UsageService.status(needsReauth: reauth, meters: meters, fetchedAt: fetchedAt, lastError: err, now: 1000)
 }
@@ -590,7 +594,7 @@ assert(st(m5, 399, "rate limited") == "rate limited", "one second past it surfac
 // 7d is a hard ceiling, not a ranking input.
 func acc7d(_ n: Int, _ active: Bool, fiveH: Double, sevenD: Double) -> Account {
     Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: "ok",
-            meters: [Meter(id: "5h", pct: fiveH, countdown: nil), Meter(id: "7d", pct: sevenD, countdown: nil)],
+            meters: [Meter(id: "5h", pct: fiveH), Meter(id: "7d", pct: sevenD)],
             ageSeconds: 1, provider: "claude")
 }
 assert(!isExhausted(acc7d(1, false, fiveH: 0, sevenD: 98)), "98% is not exhausted")
@@ -609,11 +613,11 @@ assert(autoSwitchTarget(accounts: [acc7d(1, true, fiveH: 10, sevenD: 100), acc7d
 // Ultra (formerly Max 20x) has no 5h window: a fetched 7d with no 5h is a real
 // reading, and the slot is a target gated only by the 7d ceiling.
 let no5h = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
-                   meters: [Meter(id: "7d", pct: 10, countdown: nil)], ageSeconds: 1, provider: "claude")
+                   meters: [Meter(id: "7d", pct: 10)], ageSeconds: 1, provider: "claude")
 assert(switchPct(no5h) == 0 && isSwitchTarget(no5h), "Ultra slot (7d, no 5h) is a target")
 assert(autoSwitchTarget(accounts: [mkAcc(1, true, 95), no5h], threshold: 93) == 2, "Ultra slot takes the escape")
 let no5hTight = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
-                        meters: [Meter(id: "7d", pct: 99, countdown: nil)], ageSeconds: 1, provider: "claude")
+                        meters: [Meter(id: "7d", pct: 99)], ageSeconds: 1, provider: "claude")
 assert(!isSwitchTarget(no5hTight), "Ultra slot at the 7d ceiling is not a target")
 // No meters at all (failed fetch / unknown) must still not read as headroom.
 let noMeters = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
@@ -628,7 +632,7 @@ assert(!isSwitchTarget(deadAcc(2, 10, age: 601)), "one second past it is not a t
 // windows, then RETURN to the burn account. `active` is passed as a slot number.
 func warm7d(_ n: Int, active: Bool, fiveH: Double, sevenD: Double, status: String = "ok", age: Double = 1) -> Account {
     Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: status,
-            meters: [Meter(id: "5h", pct: fiveH, countdown: nil), Meter(id: "7d", pct: sevenD, countdown: nil)],
+            meters: [Meter(id: "5h", pct: fiveH), Meter(id: "7d", pct: sevenD)],
             ageSeconds: age, provider: "claude")
 }
 
@@ -644,8 +648,8 @@ assert(burnHome([acc7d(1, false, fiveH: 95, sevenD: 10),      // over threshold 
 // resets in 16h against #2's 5 days -> burn #1.
 func accReset(_ n: Int, _ active: Bool, fiveH: Double, sevenD: Double, resetIn: Double?) -> Account {
     Account(id: "\(n)", number: n, email: "e\(n)", org: "", isActive: active, status: "ok",
-            meters: [Meter(id: "5h", pct: fiveH, countdown: nil),
-                     Meter(id: "7d", pct: sevenD, countdown: nil, resetsAt: resetIn.map { 1000 + $0 })],
+            meters: [Meter(id: "5h", pct: fiveH),
+                     Meter(id: "7d", pct: sevenD, resetsAt: resetIn.map { 1000 + $0 })],
             ageSeconds: 1, provider: "claude")
 }
 assert(burnHome([accReset(1, false, fiveH: 5, sevenD: 31, resetIn: 16 * 3600),
@@ -698,7 +702,7 @@ assert(preWarmMove(accounts: [acc7d(1, true, fiveH: 60, sevenD: 10),
                               acc7d(2, false, fiveH: 0, sevenD: 99)], active: 1) == nil, "exhausted idle is not primed")
 // idle with NO 7d meter is not treated as 0% weekly (not primed).
 let idleNo7d = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
-                       meters: [Meter(id: "5h", pct: 0, countdown: nil)], ageSeconds: 1, provider: "claude")
+                       meters: [Meter(id: "5h", pct: 0)], ageSeconds: 1, provider: "claude")
 assert(preWarmMove(accounts: [acc7d(1, true, fiveH: 60, sevenD: 30), idleNo7d], active: 1) == nil, "idle w/o 7d meter not primed")
 
 // --- keep warming / advance ---
@@ -736,19 +740,19 @@ assert(preWarmMove(accounts: [acc7d(1, true, fiveH: 2, sevenD: 97),
 // Ultra active (no 5h window): a real reading. Weekly-tight diverts like any
 // other; weekly-OK stays.
 let activeNo5h = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
-                         meters: [Meter(id: "7d", pct: 97, countdown: nil)], ageSeconds: 1, provider: "claude")
+                         meters: [Meter(id: "7d", pct: 97)], ageSeconds: 1, provider: "claude")
 assert(preWarmMove(accounts: [activeNo5h, acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == 2, "weekly-tight Ultra active diverts")
 let activeUltraOK = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
-                            meters: [Meter(id: "7d", pct: 40, countdown: nil)], ageSeconds: 1, provider: "claude")
+                            meters: [Meter(id: "7d", pct: 40)], ageSeconds: 1, provider: "claude")
 assert(preWarmMove(accounts: [activeUltraOK, acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == nil, "weekly-OK Ultra active stays")
 // An idle Ultra slot has no 5h window to open: never a pre-warm excursion.
 let idleUltra = Account(id: "2", number: 2, email: "e2", org: "", isActive: false, status: "ok",
-                        meters: [Meter(id: "7d", pct: 10, countdown: nil)], ageSeconds: 1, provider: "claude")
+                        meters: [Meter(id: "7d", pct: 10)], ageSeconds: 1, provider: "claude")
 assert(preWarmMove(accounts: [acc7d(1, true, fiveH: 30, sevenD: 20), idleUltra], active: 1) == nil,
        "Ultra idle is not primed as cold")
 // active missing 7d meter -> stay (can't judge weekly).
 let activeNo7d = Account(id: "1", number: 1, email: "e1", org: "", isActive: true, status: "ok",
-                         meters: [Meter(id: "5h", pct: 2, countdown: nil)], ageSeconds: 1, provider: "claude")
+                         meters: [Meter(id: "5h", pct: 2)], ageSeconds: 1, provider: "claude")
 assert(preWarmMove(accounts: [activeNo7d, acc7d(2, false, fiveH: 0, sevenD: 20)], active: 1) == nil, "active w/o 7d meter -> stay")
 // freshness boundary: 600s acts, 601s stays.
 assert(preWarmMove(accounts: [warm7d(1, active: true, fiveH: 60, sevenD: 20, age: 600),
@@ -1246,17 +1250,17 @@ print("CODEX SERVICE OK")
 let cxProlite = #"{"plan_type":"prolite","rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_after_seconds":247179,"reset_at":2000247179},"secondary_window":null},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":2000018000},"secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":2000604800}}}]}"#
 let cxProMeters = try CodexUsageMapper.meters(from: Data(cxProlite.utf8), now: cxNow)
 assert(cxProMeters.map(\.id) == ["7d"], "weekly-only plan → one 7d meter, unused Spark hidden: \(cxProMeters.map(\.id))")
-assert(cxProMeters[0].pct == 100 && cxProMeters[0].countdown == "2d 20h")
+assert(cxProMeters[0].pct == 100 && CodexProvider.countdown(cxProMeters[0].resetsAt, now: cxNow) == "2d 20h")
 let cxAfterOnly = #"{"rate_limit":{"primary_window":{"used_percent":100,"limit_window_seconds":604800,"reset_after_seconds":90000},"secondary_window":null}}"#
 let cxAfterMeters = try CodexUsageMapper.meters(from: Data(cxAfterOnly.utf8), now: cxNow)
-assert(cxAfterMeters.count == 1 && cxAfterMeters[0].countdown == "1d 1h",
-       "reset_after_seconds alone still yields a countdown: \(cxAfterMeters.first?.countdown ?? "nil")")
+assert(cxAfterMeters.count == 1 && CodexProvider.countdown(cxAfterMeters[0].resetsAt, now: cxNow) == "1d 1h",
+       "reset_after_seconds alone still yields a countdown")
 assert(cxAfterMeters[0].resetsAt == cxNow + 90_000)
 assert(CodexUsageMapper.soonestReset(from: Data(cxProlite.utf8)) == 2000018000, "soonest reset spans every window")
 let cxTeamUsage = #"{"rate_limit":{"primary_window":{"used_percent":42.5,"limit_window_seconds":18000,"reset_at":2000003600},"secondary_window":{"used_percent":61,"limit_window_seconds":604800,"reset_at":2000090000}},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":{"used_percent":12,"limit_window_seconds":18000,"reset_at":2000007200},"secondary_window":null}}]}"#
 let cxTeamMeters = try CodexUsageMapper.meters(from: Data(cxTeamUsage.utf8), now: cxNow)
 assert(cxTeamMeters.map(\.id) == ["5h", "7d", "Spark"], "5h + week, and a model allowance once it's in use: \(cxTeamMeters.map(\.id))")
-assert(cxTeamMeters[0].pct == 42.5 && cxTeamMeters[0].countdown == "1h 0m")
+assert(cxTeamMeters[0].pct == 42.5 && CodexProvider.countdown(cxTeamMeters[0].resetsAt, now: cxNow) == "1h 0m")
 let cxTwoSparks = #"{"rate_limit":{"primary_window":{"used_percent":1,"limit_window_seconds":604800}},"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":{"used_percent":5,"limit_window_seconds":18000}}},{"limit_name":"GPT-6-Spark","rate_limit":{"primary_window":{"used_percent":7,"limit_window_seconds":18000}}}]}"#
 let cxSparkIds = try CodexUsageMapper.meters(from: Data(cxTwoSparks.utf8), now: cxNow).map(\.id)
 assert(Set(cxSparkIds).count == cxSparkIds.count, "meter ids stay unique when short names collide: \(cxSparkIds)")
@@ -1268,7 +1272,7 @@ print("CODEX USAGE MAP OK")
 // else the week — the Claude rule would never move off a weekly-only account.
 func cxAcc(_ n: Int, _ active: Bool, _ meters: [(String, Double)], status: String = "ok", age: Double = 30) -> Account {
     Account(id: "codex:\(n)", number: n, email: "c\(n)", org: "", isActive: active, status: status,
-            meters: meters.map { Meter(id: $0.0, pct: $0.1, countdown: nil) }, ageSeconds: age, provider: "codex")
+            meters: meters.map { Meter(id: $0.0, pct: $0.1) }, ageSeconds: age, provider: "codex")
 }
 assert(codexAutoSwitchTarget(accounts: [cxAcc(1, true, [("7d", 100)]), cxAcc(2, false, [("5h", 10), ("7d", 40)])],
                              threshold: 93) == 2, "weekly-only account at its limit moves to one with room")
@@ -1373,27 +1377,29 @@ print("CONFIG DEFAULTS + SEED OK")
 // Grok billing mapper: percent present, percent absent must not become 0,
 // monthly used/limit fallback, on-demand cap, period labels.
 let grokWeekly = Data(#"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-09-10T00:00:00Z","end":"2026-09-17T00:00:00Z"},"creditUsagePercent":34.0,"subscriptionTierDisplay":"SuperGrok"}}"#.utf8)
-let grokMeters = try GrokUsageMapper.meters(from: grokWeekly, now: 1_747_000_000)
+let grokMeters = try GrokUsageMapper.meters(from: grokWeekly)
 assert(grokMeters.count == 1 && grokMeters[0].id == "7d" && Int(grokMeters[0].pct) == 34, "weekly percent → 7d")
+assert(grokMeters[0].resetsAt == ISO8601DateFormatter().date(from: "2026-09-17T00:00:00Z")!.timeIntervalSince1970,
+       "period end rides on the meter, so the countdown keeps moving")
 assert(GrokUsageMapper.plan(from: grokWeekly) == "SuperGrok")
 assert(GrokUsageMapper.percent(in: grokWeekly) == 34)
 let grokNoPct = Data(#"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-09-17T00:00:00Z"},"isUnifiedBillingUser":true}}"#.utf8)
 assert(GrokUsageMapper.percent(in: grokNoPct) == nil)
-let grokNoPctMeters = try GrokUsageMapper.meters(from: grokNoPct, now: 1_747_000_000)
+let grokNoPctMeters = try GrokUsageMapper.meters(from: grokNoPct)
 assert(grokNoPctMeters.count == 1 && grokNoPctMeters[0].id == "7d" && grokNoPctMeters[0].pct == 0,
        "bare weekly window, no percent → 0% (proto3 drops zero)")
 // Live shape: zero caps must not win, and used/limit still beats the 0% fallback.
 let grokZeroCaps = Data(#"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-09-30T16:25:09.749371+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"isUnifiedBillingUser":true,"monthlyLimit":{"val":0},"used":{"val":32}}}"#.utf8)
-let grokZeroCapsM = try GrokUsageMapper.meters(from: grokZeroCaps, now: 1_747_000_000)
+let grokZeroCapsM = try GrokUsageMapper.meters(from: grokZeroCaps)
 assert(grokZeroCapsM.count == 1 && grokZeroCapsM[0].id == "7d" && grokZeroCapsM[0].pct == 0, "zero limits → 0% window")
 let grokNoWindow = Data(#"{"config":{"onDemandCap":{"val":0}}}"#.utf8)
-let grokNoWindowM = try GrokUsageMapper.meters(from: grokNoWindow, now: 1_747_000_000)
+let grokNoWindowM = try GrokUsageMapper.meters(from: grokNoWindow)
 assert(grokNoWindowM.isEmpty, "no window → no meter")
 let grokMonthly = Data(#"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_MONTHLY","end":"2026-10-01T00:00:00Z"},"monthlyLimit":{"val":10000},"used":{"val":2500}}}"#.utf8)
-let grokMo = try GrokUsageMapper.meters(from: grokMonthly, now: 1_747_000_000)
+let grokMo = try GrokUsageMapper.meters(from: grokMonthly)
 assert(grokMo.count == 1 && grokMo[0].id == "30d" && Int(grokMo[0].pct) == 25, "monthly used/limit")
 let grokOD = Data(#"{"config":{"onDemandCap":{"val":100},"onDemandUsed":{"val":40}}}"#.utf8)
-let grokOdM = try GrokUsageMapper.meters(from: grokOD, now: 1_747_000_000)
+let grokOdM = try GrokUsageMapper.meters(from: grokOD)
 assert(grokOdM.count == 1 && grokOdM[0].id == "OD" && Int(grokOdM[0].pct) == 40, "on-demand fallback")
 let grokAuthDir = NSTemporaryDirectory() + "cbar-selftest-grok-\(getpid())"
 try! FileManager.default.createDirectory(atPath: grokAuthDir, withIntermediateDirectories: true)
@@ -1477,12 +1483,14 @@ let agyQuota = Data(#"""
   ]}
 ]}
 """#.utf8)
-let agyMeters = try AntigravityUsageMapper.meters(from: agyQuota, now: 1_747_000_000)
+let agyMeters = try AntigravityUsageMapper.meters(from: agyQuota)
 assert(agyMeters.map(\.id) == ["Gem 5h", "Gem 7d", "Cl 5h", "Cl 7d"], "group prefixes, 5h then 7d: \(agyMeters.map(\.id))")
 assert(Int(agyMeters[0].pct) == 40 && Int(agyMeters[1].pct) == 75, "used = 1 − remaining")
 assert(Int(agyMeters[2].pct) == 0, "untouched bucket is 0 used, not missing")
+assert(agyMeters[1].resetsAt == ISO8601DateFormatter().date(from: "2026-09-20T00:00:00Z")!.timeIntervalSince1970,
+       "bucket reset survives the group relabel")
 let agyOne = Data(#"{"groups":[{"displayName":"Gemini Models","buckets":[{"displayName":"Weekly Limit","remainingFraction":0.5,"resetTime":"2026-09-20T00:00:00Z"}]}]}"#.utf8)
-let agyOneM = try AntigravityUsageMapper.meters(from: agyOne, now: 1_747_000_000)
+let agyOneM = try AntigravityUsageMapper.meters(from: agyOne)
 assert(agyOneM.count == 1 && agyOneM[0].id == "7d", "single group keeps the plain window id")
 let agyLoad = Data(#"{"cloudaicompanionProject":"proj-1","paidTier":{"id":"ultra","name":"Google AI Ultra"},"currentTier":{"id":"free-tier"}}"#.utf8)
 assert(AntigravityUsageMapper.project(from: agyLoad) == "proj-1")
@@ -1582,7 +1590,7 @@ if CommandLine.arguments.contains("--live") {
     let cxMs = Int(Date().timeIntervalSince(cxStart) * 1000)
     if let cx = cxAccts.first {
         print("CODEX LIVE: \(cx.email) [\(cx.org)] in \(cxMs)ms — " +
-              cx.meters.map { "\($0.id)=\(Int($0.pct))% (\($0.countdown ?? "—"))" }.joined(separator: " ") +
+              cx.meters.map { "\($0.id)=\(Int($0.pct))% (\(CodexProvider.countdown($0.resetsAt, now: Date().timeIntervalSince1970) ?? "—"))" }.joined(separator: " ") +
               " age=\(cx.ageSeconds.map { "\(Int($0))s" } ?? "?")")
     } else {
         print("CODEX LIVE: no session rate-limit data found (\(cxMs)ms)")
@@ -1593,7 +1601,7 @@ if CommandLine.arguments.contains("--live") {
     let grokMs = Int(Date().timeIntervalSince(grokStart) * 1000)
     if let g = grokAccts.first {
         print("GROK LIVE: \(g.email) [\(g.org)] in \(grokMs)ms status=\(g.status) — " +
-              g.meters.map { "\($0.id)=\(Int($0.pct))% (\($0.countdown ?? "—"))" }.joined(separator: " "))
+              g.meters.map { "\($0.id)=\(Int($0.pct))% (\(CodexProvider.countdown($0.resetsAt, now: Date().timeIntervalSince1970) ?? "—"))" }.joined(separator: " "))
     } else {
         print("GROK LIVE: no ~/.grok/auth.json (\(grokMs)ms)")
     }
@@ -1603,7 +1611,7 @@ if CommandLine.arguments.contains("--live") {
     let agyMs = Int(Date().timeIntervalSince(agyStart) * 1000)
     if let a = agyAccts.first {
         print("ANTIGRAVITY LIVE: \(a.email) [\(a.org)] in \(agyMs)ms status=\(a.status) — " +
-              a.meters.map { "\($0.id)=\(Int($0.pct))% (\($0.countdown ?? "—"))" }.joined(separator: " "))
+              a.meters.map { "\($0.id)=\(Int($0.pct))% (\(CodexProvider.countdown($0.resetsAt, now: Date().timeIntervalSince1970) ?? "—"))" }.joined(separator: " "))
     } else {
         print("ANTIGRAVITY LIVE: no Keychain login (\(agyMs)ms)")
     }

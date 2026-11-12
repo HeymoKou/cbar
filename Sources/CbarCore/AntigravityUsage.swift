@@ -233,7 +233,7 @@ public enum AntigravityOAuth {
 /// pools; each carries a Five Hour and a Weekly bucket. `remainingFraction`
 /// is remaining, so used = (1 − fraction) × 100.
 public enum AntigravityUsageMapper {
-    public static func meters(from data: Data, now: Double = Date().timeIntervalSince1970) throws -> [Meter] {
+    public static func meters(from data: Data) throws -> [Meter] {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let groups = o["groups"] as? [[String: Any]] else { throw OAuthError.badResponse }
         let named = groups.compactMap { group -> (prefix: String, meters: [Meter])? in
@@ -243,8 +243,7 @@ public enum AntigravityUsageMapper {
                 let window = windowID(bucket["displayName"] as? String, bucket["window"] as? String)
                 let reset = (bucket["resetTime"] as? String) ?? (bucket["reset_time"] as? String)
                 return Meter(id: window, pct: clamp((1 - frac) * 100),
-                             countdown: reset.flatMap(UsageMapper.parseISO)
-                                .flatMap { CodexProvider.countdown($0.timeIntervalSince1970, now: now) })
+                             resetsAt: reset.flatMap(UsageMapper.parseISO)?.timeIntervalSince1970)
             }
             guard !ms.isEmpty else { return nil }
             return (groupPrefix(group["displayName"] as? String), ms)
@@ -257,7 +256,7 @@ public enum AntigravityUsageMapper {
                 var id = multi ? "\(prefix) \(m.id)" : m.id
                 if seen.contains(id) { id = "\(prefix) \(m.id)" }
                 seen.insert(id)
-                out.append(Meter(id: id, pct: m.pct, countdown: m.countdown))
+                out.append(Meter(id: id, pct: m.pct, resetsAt: m.resetsAt))
             }
         }
         out.sort { meterOrder($0.id) < meterOrder($1.id) }
@@ -292,8 +291,7 @@ public enum AntigravityUsageMapper {
         return best.keys.sorted { meterOrder($0) < meterOrder($1) }.map { id in
             let v = best[id]!
             let label = multi ? id : (id.split(separator: " ").last.map(String.init) ?? id)
-            return Meter(id: label, pct: clamp((1 - v.frac) * 100),
-                         countdown: CodexProvider.countdown(v.reset, now: now))
+            return Meter(id: label, pct: clamp((1 - v.frac) * 100), resetsAt: v.reset)
         }
     }
 
@@ -462,7 +460,7 @@ public final class AntigravityUsageService {
         do {
             let quota = try client.quotaSummary(accessToken: token,
                                                 project: load.flatMap { AntigravityUsageMapper.project(from: $0) })
-            let meters = try AntigravityUsageMapper.meters(from: quota, now: now)
+            let meters = try AntigravityUsageMapper.meters(from: quota)
             if !meters.isEmpty {
                 row.meters = meters
                 row.resetsAt = AntigravityUsageMapper.soonestReset(from: quota)

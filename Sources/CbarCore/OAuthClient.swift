@@ -167,7 +167,7 @@ public enum UsageMapper {
             guard let w = o[key] as? [String: Any] else { return }
             guard let u = (w["utilization"] as? Double) ?? (w["utilization"] as? Int).map(Double.init) else { return }
             let iso = w["resets_at"] as? String
-            m.append(Meter(id: id, pct: u, countdown: countdown(iso), resetsAt: epoch(iso)))
+            m.append(Meter(id: id, pct: u, resetsAt: epoch(iso)))
         }
         win("five_hour", "5h")
         win("seven_day", "7d")
@@ -177,7 +177,7 @@ public enum UsageMapper {
                 let pct = (lim["percent"] as? Double) ?? (lim["percent"] as? Int).map(Double.init)
                 if let name, let pct {
                     let iso = lim["resets_at"] as? String
-                    m.append(Meter(id: name == "Fable" ? "Fbl" : name, pct: pct, countdown: countdown(iso), resetsAt: epoch(iso)))
+                    m.append(Meter(id: name == "Fable" ? "Fbl" : name, pct: pct, resetsAt: epoch(iso)))
                 }
             }
         }
@@ -186,9 +186,7 @@ public enum UsageMapper {
 
     /// The soonest absolute reset time (epoch seconds) across every window in the
     /// raw usage JSON, or nil if none carry one. This is the fact `fetchPlan` needs
-    /// to hot-reload an account the moment a window rolls over — `Meter.countdown`
-    /// is a relative string computed once at fetch and can't be compared to a
-    /// later `now`.
+    /// to hot-reload an account the moment a window rolls over.
     public static func soonestReset(from data: Data) -> Double? {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         var soonest: Double?
@@ -207,16 +205,6 @@ public enum UsageMapper {
 
     static func epoch(_ iso: String?) -> Double? {
         iso.flatMap(parseISO)?.timeIntervalSince1970
-    }
-
-    static func countdown(_ iso: String?) -> String? {
-        guard let iso, let d = parseISO(iso) else { return nil }
-        let s = Int(d.timeIntervalSinceNow)
-        if s <= 0 { return "now" }
-        let dd = s / 86400, h = (s % 86400) / 3600, mn = (s % 3600) / 60
-        if dd > 0 { return "\(dd)d \(h)h" }
-        if h > 0 { return "\(h)h \(mn)m" }
-        return "\(mn)m"
     }
 
     /// The usage API's `resets_at` carries fractional seconds (e.g.
