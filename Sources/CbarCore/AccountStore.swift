@@ -115,15 +115,36 @@ public final class AccountStore {
     }
 
     /// Capture the CURRENT live Claude login as a managed account (full oauthAccount).
+    ///
+    /// The identity is `.claude.json`'s, but only once the profile API agrees the
+    /// live token belongs to it: `/login` writes the keychain and `.claude.json`
+    /// non-atomically, and trusting their coherence filed one account's token
+    /// under another's name (2026-07-10). No `oauthAccount` is an error too — an
+    /// "(unknown)" slot can never be matched or switched to correctly.
+    /// `creds`, `configPath` and `profile` are seams for the self-test.
     @discardableResult
-    public func addCurrent() throws -> Int {
-        guard let creds = try Credentials.readActive() else {
-            throw NSError(domain: "cbar", code: 2, userInfo: [NSLocalizedDescriptionKey: "no active Claude login found"])
+    public func addCurrent(creds readCreds: () throws -> ClaudeAiOauth? = { try Credentials.readActive() },
+                           configPath: String? = nil,
+                           profile: (String) throws -> ClaudeConfig.OAuthAccount = {
+                               try OAuthClient().fetchProfile(accessToken: $0)
+                           }) throws -> Int {
+        func fail(_ code: Int, _ msg: String) -> NSError {
+            NSError(domain: "cbar", code: code, userInfo: [NSLocalizedDescriptionKey: msg])
         }
-        let acc = try ClaudeConfig.readAccount()
-        let oauthJSON = (try? ClaudeConfig.readRawAccount()).flatMap { $0 }.flatMap { Self.jsonString($0) }
-        return try add(email: acc?.emailAddress ?? "(unknown)", uuid: acc?.accountUuid,
-                       orgUuid: acc?.organizationUuid, orgName: acc?.organizationName,
+        guard let creds = try readCreds() else { throw fail(2, "no active Claude login found") }
+        guard let acc = try ClaudeConfig.readAccount(at: configPath), let uuid = acc.accountUuid else {
+            throw fail(3, "Claude Code's config has no logged-in account — run /login in Claude Code first")
+        }
+        let owner: ClaudeConfig.OAuthAccount
+        do { owner = try profile(creds.accessToken) } catch {
+            throw fail(4, "could not verify which account is logged in (\(error)) — try again")
+        }
+        guard owner.accountUuid == uuid else {
+            throw fail(5, "Claude Code's login and its config name different accounts — /login may still be finishing; try again")
+        }
+        let oauthJSON = (try? ClaudeConfig.readRawAccount(at: configPath)).flatMap { $0 }.flatMap { Self.jsonString($0) }
+        return try add(email: acc.emailAddress ?? owner.emailAddress ?? "(unknown)", uuid: uuid,
+                       orgUuid: acc.organizationUuid, orgName: acc.organizationName,
                        oauthJSON: oauthJSON, creds: creds)
     }
 

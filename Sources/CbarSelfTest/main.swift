@@ -365,6 +365,37 @@ let bigBack = try store.creds(n1)
 assert(bigBack?.accessToken == "a" && bigBack.map { Credentials.serialize($0).contains("subscriptionType") } == true
        && bigBack.map { Credentials.serialize($0).contains("mcpOAuth") } == false, "oversized blob falls back to claudeAiOauth")
 try store.setCreds(n1, sc)
+// "Add current account" files the live token under the identity in
+// .claude.json only when the profile API agrees whose token it is.
+let acCfg = storeDir + "/claude.json"
+let acTok = ClaudeAiOauth(accessToken: "AT-live", refreshToken: "RT-live", expiresAt: 9e15, scopes: nil)
+func acProfile(_ uuid: String) -> (String) throws -> ClaudeConfig.OAuthAccount {
+    { tok in
+        assert(tok == "AT-live", "profile asked about the live token")
+        return .init(emailAddress: nil, accountUuid: uuid, organizationUuid: "OL", organizationName: nil)
+    }
+}
+func acError(_ body: () throws -> Int) -> String? {
+    do { _ = try body(); return nil } catch { return error.localizedDescription }
+}
+try! #"{"oauthAccount":{"accountUuid":"UL","emailAddress":"live@x.com","organizationUuid":"OL","billingType":"x"}}"#
+    .write(toFile: acCfg, atomically: true, encoding: .utf8)
+let acMismatch = acError { try store.addCurrent(creds: { acTok }, configPath: acCfg, profile: acProfile("U-other")) }
+assert(acMismatch?.contains("different accounts") == true, "token owned by another account → refused: \(acMismatch ?? "nil")")
+let acDown = acError { try store.addCurrent(creds: { acTok }, configPath: acCfg, profile: { _ in throw OAuthError.network }) }
+assert(acDown?.contains("could not verify") == true, "unverifiable → refused, never guessed")
+assert(store.list().map(\.email) == ["a@x.com"], "refusals add nothing")
+let acN = try store.addCurrent(creds: { acTok }, configPath: acCfg, profile: acProfile("UL"))
+assert(store.list().first { $0.number == acN }?.email == "live@x.com", "verified login captured under its config identity")
+assert(store.oauthAccount(acN)?["billingType"] as? String == "x", "full oauthAccount kept for the switch splice")
+let acBack = try store.creds(acN)
+assert(acBack?.accessToken == "AT-live", "live token stored")
+try! #"{"numStartups":1}"#.write(toFile: acCfg, atomically: true, encoding: .utf8)
+let acNoAcct = acError { try store.addCurrent(creds: { acTok }, configPath: acCfg, profile: acProfile("UL")) }
+assert(acNoAcct?.contains("no logged-in account") == true, "no oauthAccount → error, not an (unknown) slot")
+let acNoCreds = acError { try store.addCurrent(creds: { nil }, configPath: acCfg, profile: acProfile("UL")) }
+assert(acNoCreds?.contains("no active Claude login") == true)
+try store.remove(acN)
 let n2 = try store.add(email: "a@x.com", uuid: "U1", orgUuid: "O1", orgName: "Org", creds: sc) // re-capture same identity
 assert(n1 == n2 && store.list().count == 1, "re-capture dedup")
 try store.remove(n1)
