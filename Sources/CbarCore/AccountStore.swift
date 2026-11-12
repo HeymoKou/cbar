@@ -137,7 +137,8 @@ public final class AccountStore {
         }
         let owner: ClaudeConfig.OAuthAccount
         do { owner = try profile(creds.accessToken) } catch {
-            throw fail(4, "could not verify which account is logged in (\(error)) — try again")
+            CbarLog.write("add current: profile check failed: \(error)")   // raw form, for the log only
+            throw fail(4, "could not verify which account is logged in (\(describeError(error))) — try again")
         }
         guard owner.accountUuid == uuid else {
             throw fail(5, "Claude Code's login and its config name different accounts — /login may still be finishing; try again")

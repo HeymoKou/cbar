@@ -63,7 +63,9 @@ final class UsageStore {
         work.async { [weak self] in
             var err: String?
             do { try body() } catch {
-                err = "\(what): \(error)"
+                // Words for the banner; the raw form, which names the type and
+                // code, is for the log.
+                err = "Couldn't \(what): \(describeError(error))"
                 CbarLog.write("\(what) FAILED: \(error)")
             }
             // Hand the message to the refresh rather than setting it here: the
@@ -87,7 +89,8 @@ final class UsageStore {
             lastError = nil
             CbarLog.write("\(setting.rawValue) = \(enabled)")
         } catch {
-            lastError = "Could not save auto-switch setting: \(error.localizedDescription)"
+            lastError = "Couldn't save the setting: \(describeError(error))"
+            CbarLog.write("save \(setting.rawValue) FAILED: \(error)")
         }
         onUpdate?()
     }
@@ -196,7 +199,10 @@ final class UsageStore {
             var accs: [Account] = []
             var err: String? = carrying
             var added: String?
-            do { accs = try self.usage.accounts() } catch { err = err ?? "\(error)" }
+            do { accs = try self.usage.accounts() } catch {
+                err = err ?? "Couldn't read Claude usage: \(describeError(error))"
+                CbarLog.write("refresh FAILED: \(error)")
+            }
             // A login finished in the inbox since the last pass (see `addCodexAccount`).
             do {
                 if let n = try self.codexInbox.importIfPresent(into: self.codexStore) {
@@ -205,7 +211,10 @@ final class UsageStore {
                     added = "Codex account \(email) added"
                     CbarLog.write("codex account #\(n) \(email) imported from login inbox")
                 }
-            } catch { err = err ?? "import Codex login: \(error)" }
+            } catch {
+                err = err ?? "Couldn't import the Codex login: \(describeError(error))"
+                CbarLog.write("import Codex login FAILED: \(error)")
+            }
             accs += self.codexStore.list().isEmpty ? ((try? self.codex.accounts()) ?? []) : self.codexUsage.accounts()
             accs += self.grok.accounts()
             accs += self.antigravity.accounts()
@@ -313,7 +322,7 @@ final class UsageStore {
         guard account.switchable else { return }
         if account.provider == "codex" {
             lastCodexSwitchAt = Date()
-            mutate("switch Codex to #\(account.number)") { [weak self, codexSwitcher] in
+            mutate("switch Codex to account #\(account.number)") { [weak self, codexSwitcher] in
                 try codexSwitcher.switchTo(account.number)
                 let daemon = CodexLive.daemonRunning()
                 CbarLog.write("codex manual switch → #\(account.number)"
@@ -330,7 +339,7 @@ final class UsageStore {
         // reverse a hand-picked account a second later — the auto path only wrote
         // this timestamp itself, so a manual switch used to be fair game to undo.
         lastAutoSwitchAt = Date()
-        mutate("switch to #\(account.number)") { [weak self, switcher] in
+        mutate("switch to account #\(account.number)") { [weak self, switcher] in
             try switcher.switchTo(account.number)
             CbarLog.write("manual switch → #\(account.number) \(account.email)")
             // Main, like every other read of it; queued ahead of the refresh
@@ -353,7 +362,7 @@ final class UsageStore {
         // Clear the slot's stale failure state after capturing fresh creds — this
         // IS the "fix a dead slot" path, and its backoff/needs-reauth must not
         // outlive the re-login (credsChanged can't see it, slot == live).
-        mutate("add current account") { [store, usage] in
+        mutate("add the Claude account") { [store, usage] in
             let n = try store.addCurrent()
             usage.clearFailureState(n)
         }
@@ -362,12 +371,12 @@ final class UsageStore {
     func remove(_ account: Account) {
         guard account.switchable else { return }
         if account.provider == "codex" {
-            mutate("remove Codex #\(account.number)") { [codexStore, codexUsage] in
+            mutate("remove Codex account #\(account.number)") { [codexStore, codexUsage] in
                 try codexStore.remove(account.number)
                 codexUsage.forget(account.number)
             }
         } else {
-            mutate("remove #\(account.number)") { [store, usage] in
+            mutate("remove account #\(account.number)") { [store, usage] in
                 try store.remove(account.number)
                 usage.forget(account.number)
             }
@@ -379,7 +388,7 @@ final class UsageStore {
     /// OTHER than `~/.codex` — `codex login` there would revoke the one just
     /// saved — so hand over the inbox command and import on a later poll.
     func addCodexAccount() {
-        mutate("add Codex account") { [weak self, codexStore, codexInbox, codexUsage] in
+        mutate("add the Codex account") { [weak self, codexStore, codexInbox, codexUsage] in
             if let mode = CodexLive.credentialsStore(), mode != "file" {
                 throw CodexSwitcher.SwitchErr.unsupportedStore(mode)
             }

@@ -364,6 +364,7 @@ let acMismatch = acError { try store.addCurrent(creds: { acTok }, configPath: ac
 assert(acMismatch?.contains("different accounts") == true, "token owned by another account → refused: \(acMismatch ?? "nil")")
 let acDown = acError { try store.addCurrent(creds: { acTok }, configPath: acCfg, profile: { _ in throw OAuthError.network }) }
 assert(acDown?.contains("could not verify") == true, "unverifiable → refused, never guessed")
+assert(acDown?.contains("(network unreachable)") == true, "the cause is in words, not `network`: \(acDown ?? "nil")")
 assert(store.list().map(\.email) == ["a@x.com"], "refusals add nothing")
 let acN = try store.addCurrent(creds: { acTok }, configPath: acCfg, profile: acProfile("UL"))
 assert(store.list().first { $0.number == acN }?.email == "live@x.com", "verified login captured under its config identity")
@@ -397,6 +398,36 @@ try store.remove(n3)
 try? Keychain.delete(service: storeSvc, account: "account-\(n1)")
 try? FileManager.default.removeItem(atPath: storeDir)
 print("STORE OK")
+
+// ---- describeError: what the banner and tooltip say -------------------------
+// They used to interpolate the error, which printed Swift's debug form.
+assert(describeError(OAuthError.http(429, retryAfter: nil)).hasPrefix("rate limited"))
+assert(describeError(OAuthError.http(500, retryAfter: nil)) == "server error (HTTP 500)")
+assert(describeError(OAuthError.http(401, retryAfter: nil)).hasPrefix("not authorized"))
+assert(describeError(OAuthError.needsReauth) == "needs re-login")
+assert(describeError(OAuthError.network) == "network unreachable")
+assert(describeError(OAuthError.transient) == "token refresh failed, will retry")
+assert(describeError(OAuthError.badResponse) == "unexpected response from the server")
+assert(describeError(Keychain.KErr.failed(-3, "get x: timed out")).contains("did not answer"))
+assert(describeError(Keychain.KErr.failed(-4, "set x: too large")).contains("too large"))
+assert(describeError(Keychain.KErr.failed(51, "get x: …")) == "Keychain error (security exited 51)")
+// Whatever a KErr's message holds stays out of the sentence.
+let deSecret = Keychain.KErr.failed(1, "set cbar: add-generic-password -w s3cr3t-value")
+assert(!describeError(deSecret).contains("s3cr3t"), "a Keychain message never reaches the UI")
+assert(describeError(Switcher.SwitchErr.noCredentials(3)) == "account #3 has no saved login — add it again")
+assert(describeError(Switcher.SwitchErr.noOAuthAccount(4)).hasPrefix("account #4 "))
+assert(describeError(CodexSwitcher.SwitchErr.liveChanged) == CodexSwitcher.SwitchErr.liveChanged.description)
+assert(describeError(CodexSwitcher.SwitchErr.noCredentials(2)) == "Codex slot #2 has no stored login")
+let deNS = NSError(domain: "cbar", code: 2, userInfo: [NSLocalizedDescriptionKey: "no active Claude login found"])
+assert(describeError(deNS) == "no active Claude login found", "NSError → its own sentence")
+let deErrors: [Error] = [OAuthError.http(429, retryAfter: 3), OAuthError.transient, deNS, deSecret,
+                         Switcher.SwitchErr.noCredentials(3), CodexSwitcher.SwitchErr.unmanagedLogin]
+for e in deErrors {
+    let s = describeError(e)
+    assert(!s.isEmpty && !s.contains("Error Domain") && !s.contains("retryAfter") && !s.contains("failed(")
+           && !s.contains("noCredentials") && !s.contains("CbarCore."), "no debug form: \(s)")
+}
+print("DESCRIBE ERROR OK")
 
 // Everything under ~/.cbar must be owner-only. These files name every account
 // and copy Claude Code's oauthAccount verbatim; the mode used to be whatever
