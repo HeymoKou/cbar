@@ -95,6 +95,7 @@ final class UsageStore {
 
     func start() {
         SecureFile.tightenAll(dir: "\(NSHomeDirectory())/.cbar")
+        OAuthClient.purgeLegacyHTTPStorage()
         // First run writes the config, so what cbar is armed to do is a file the
         // user can read — not a default they have to find in the source. Before
         // the first refresh, so pass one already sees the real settings.

@@ -299,6 +299,27 @@ assert(UsageMapper.soonestReset(from: Data(#"{"five_hour":{"utilization":1.0,"re
        "no resets_at → nil")
 print("OAUTH MAP OK")
 
+// Bearer tokens must not reach a disk cache or a shared cookie jar.
+let httpCfg = OAuthClient.session.configuration
+assert(httpCfg.urlCache == nil, "no URL cache")
+assert(httpCfg.httpCookieStorage == nil, "no cookie storage")
+let purgeHome = NSTemporaryDirectory() + "cbar-selftest-purge-\(getpid())"
+for p in ["Library/Caches/com.heymo.cbar", "Library/HTTPStorages/com.heymo.cbar"] {
+    try! FileManager.default.createDirectory(atPath: "\(purgeHome)/\(p)", withIntermediateDirectories: true)
+}
+try! Data("x".utf8).write(to: URL(fileURLWithPath: "\(purgeHome)/Library/Caches/com.heymo.cbar/Cache.db"))
+try! Data("x".utf8).write(to: URL(fileURLWithPath: "\(purgeHome)/Library/HTTPStorages/com.heymo.cbar.binarycookies"))
+try! Data("keep".utf8).write(to: URL(fileURLWithPath: "\(purgeHome)/Library/Caches/other"))
+OAuthClient.purgeLegacyHTTPStorage(home: purgeHome)
+for p in ["Library/Caches/com.heymo.cbar", "Library/HTTPStorages/com.heymo.cbar",
+          "Library/HTTPStorages/com.heymo.cbar.binarycookies"] {
+    assert(!FileManager.default.fileExists(atPath: "\(purgeHome)/\(p)"), "purged \(p)")
+}
+assert(FileManager.default.fileExists(atPath: "\(purgeHome)/Library/Caches/other"), "neighbours untouched")
+OAuthClient.purgeLegacyHTTPStorage(home: purgeHome)   // absent paths: harmless
+try? FileManager.default.removeItem(atPath: purgeHome)
+print("HTTP STORAGE OK")
+
 // AccountStore on throwaway dir + keychain service
 let storeDir = NSTemporaryDirectory() + "cbar-store-\(ProcessInfo.processInfo.processIdentifier)"
 let storeSvc = "cbar-selftest-store"

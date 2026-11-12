@@ -91,10 +91,31 @@ public struct OAuthClient {
         return (access, now_ms + expiresIn * 1000, o["refresh_token"] as? String, scope)
     }
 
+    /// Every request here carries a bearer token, and `URLSession.shared` wrote
+    /// them to `~/Library/Caches/com.heymo.cbar/Cache.db` (0644) and pooled
+    /// cookies across accounts. Ephemeral, and no cache or cookie jar even in
+    /// memory: nothing cbar fetches is worth reusing.
+    public static let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.urlCache = nil
+        c.httpCookieStorage = nil
+        return URLSession(configuration: c)
+    }()
+
+    /// Delete what `URLSession.shared` left on disk before `session` replaced
+    /// it. Runs at every launch; a no-op once the paths are gone.
+    public static func purgeLegacyHTTPStorage(home: String = NSHomeDirectory()) {
+        for p in ["Library/Caches/com.heymo.cbar",
+                  "Library/HTTPStorages/com.heymo.cbar",
+                  "Library/HTTPStorages/com.heymo.cbar.binarycookies"] {
+            try? FileManager.default.removeItem(atPath: "\(home)/\(p)")
+        }
+    }
+
     func send(_ req: URLRequest) throws -> (Data, Int, Double?) {
         var outData: Data?; var status = 0; var retryAfter: Double?; var netErr = false
         let sem = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { d, resp, e in
+        Self.session.dataTask(with: req) { d, resp, e in
             outData = d
             if let http = resp as? HTTPURLResponse {
                 status = http.statusCode
