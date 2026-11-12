@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token: this workflow builds and tests, it never writes back.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     # macos-15, not macos-14: the 14 image ships Swift 5.10 and Package.swift
@@ -12,7 +16,8 @@ jobs:
     # is independent of which OS builds it.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v5
+      # Pinned to a commit: a tag can be moved under us.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Build
         run: swift build
       # The self-test creates and deletes throwaway login-Keychain items, which
