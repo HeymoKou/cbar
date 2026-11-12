@@ -356,7 +356,10 @@ final class UsageStore {
                 codexUsage.forget(account.number)
             }
         } else {
-            mutate("remove #\(account.number)") { [store] in try store.remove(account.number) }
+            mutate("remove #\(account.number)") { [store, usage] in
+                try store.remove(account.number)
+                usage.forget(account.number)
+            }
         }
     }
 

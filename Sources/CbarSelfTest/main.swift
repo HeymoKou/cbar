@@ -335,6 +335,19 @@ assert(n1 == n2 && store.list().count == 1, "re-capture dedup")
 try store.remove(n1)
 let cAfter = try store.creds(n1)
 assert(store.list().isEmpty && cAfter == nil, "removed")
+// A removed slot's number is reused by the next add; its usage row must not be.
+let fgCache = storeDir + "/usage-cache.json"
+try! Data(#"{"1":{"meters":[{"id":"5h","pct":80}],"failures":0,"needsReauth":false},"2":{"meters":[],"failures":0,"needsReauth":false}}"#.utf8)
+    .write(to: URL(fileURLWithPath: fgCache))
+let fgSvc = UsageService(store: store, cachePath: fgCache)
+fgSvc.forget(1)
+let fgRows = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: fgCache))) as! [String: Any]
+assert(fgRows["1"] == nil && fgRows["2"] != nil, "forget drops only that slot's row: \(fgRows.keys.sorted())")
+fgSvc.forget(1)   // already gone: no-op
+let n3 = try store.add(email: "c@x.com", uuid: "U3", orgUuid: "O3", orgName: nil, creds: sc)
+assert(n3 == 1, "slot number reused after removal")
+assert(fgRows["\(n3)"] == nil, "the reused number starts with no cached usage")
+try store.remove(n3)
 try? Keychain.delete(service: storeSvc, account: "account-\(n1)")
 try? FileManager.default.removeItem(atPath: storeDir)
 print("STORE OK")

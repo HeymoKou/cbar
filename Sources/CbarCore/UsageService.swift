@@ -93,6 +93,15 @@ public final class UsageService: Provider {
         cache[n] = row; saveCache(cache)
     }
 
+    /// Forget a removed slot's cached usage. `AccountStore.add` numbers a new
+    /// slot max+1, so removing the highest slot and adding another reuses its
+    /// number — and, without this, its usage.
+    public func forget(_ n: Int) {
+        var cache = loadCache()
+        guard cache.removeValue(forKey: n) != nil else { return }
+        saveCache(cache)
+    }
+
     public func accounts() throws -> [Account] {
         let now = Date().timeIntervalSince1970
         let list = store.list()
