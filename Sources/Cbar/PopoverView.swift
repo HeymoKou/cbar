@@ -677,12 +677,20 @@ struct AccountCard: View {
         }
     }
 
+    /// Re-rendered each minute so "reset in 12m" counts down while the panel
+    /// stays open; it only moved when a poll replaced the accounts.
     private var meters: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { ctx in
+            meterRow(now: ctx.date.timeIntervalSince1970)
+        }
+    }
+
+    private func meterRow(now: Double) -> some View {
         HStack(spacing: 12) {
             ForEach(acc.meters) { m in
                 ScanMeter(label: meterLabel(m.id),
                           pct: m.pct,
-                          caption: caption(for: m),
+                          caption: caption(for: m, now: now),
                           captionColor: captionColor(for: m),
                           mark: ProviderMark.Kind.meter(m.id),
                           color: Metric.color(for: m.id),
@@ -704,8 +712,8 @@ struct AccountCard: View {
     /// replace it on the active switch window, which hid the countdown on a full
     /// Codex week (prolite at 100% showed "over 93%" and nothing about when it
     /// comes back). Prefer `resetsAt` so the string is not a snapshot from fetch.
-    private func caption(for m: Meter) -> String? {
-        let remain = CodexProvider.countdown(m.resetsAt, now: Date().timeIntervalSince1970)
+    private func caption(for m: Meter, now: Double) -> String? {
+        let remain = CodexProvider.countdown(m.resetsAt, now: now)
         if let c = remain { return "reset in \(c)" }
         if m.id == switchMeter, acc.isActive, let t = threshold, m.pct >= t {
             return "over \(Int(t))%"
