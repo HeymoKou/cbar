@@ -22,6 +22,15 @@ if [ -z "$local_version" ]; then
     exit 1
 fi
 
+# A push straight to a URL has no `$1/main` to read, and an empty version
+# compares as "changed" — the guard would pass without having looked.
+if ! git remote get-url "$1" >/dev/null 2>&1; then
+    echo "pre-push: pushing to a URL ($1), not a named remote, so VERSION can't be" >&2
+    echo "          compared with what is there. Push via a remote name, or skip" >&2
+    echo "          the check on purpose: git push --no-verify" >&2
+    exit 1
+fi
+
 # Empty on the first push after VERSION is introduced, which correctly passes.
 remote_version="$(git show "$1/main:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
 
