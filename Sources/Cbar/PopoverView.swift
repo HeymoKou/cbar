@@ -531,6 +531,9 @@ struct AccountCard: View {
     let switchAction: () -> Void
     var removeAction: (() -> Void)? = nil
     @ViewState private var hovering = false
+    /// First click on ✕ only arms it: Remove deletes the slot's Keychain item,
+    /// and one stray click used to do that with no way back.
+    @ViewState private var confirmingRemove = false
 
     private var exhausted: Bool {
         if acc.switchable { return isExhausted(acc) }
@@ -577,7 +580,17 @@ struct AccountCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 9))
         .contentShape(RoundedRectangle(cornerRadius: 9))
         .animation(.easeOut(duration: 0.12), value: hovering)
-        .onHover { hovering = $0 }
+        .onHover { h in
+            hovering = h
+            if !h { confirmingRemove = false }   // leaving the card disarms
+        }
+        // …and so do 4 s without the second click. Restarted per arm, and
+        // cancelled with the view.
+        .task(id: confirmingRemove) {
+            guard confirmingRemove else { return }
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if !Task.isCancelled { confirmingRemove = false }
+        }
     }
 
     private var border: Color {
@@ -639,10 +652,26 @@ struct AccountCard: View {
                         .disabled(busy)
                 }
                 if let removeAction {
-                    Button(action: removeAction) { Image(systemName: "xmark").font(.system(size: 12)) }
-                        .buttonStyle(HoverButtonStyle(compact: true))
-                        .foregroundStyle(hovering ? Noct.ink3 : Noct.ink5)
-                        .disabled(busy)
+                    // One button whose label changes, not two: it keeps its
+                    // hover and cursor state across the swap.
+                    Button {
+                        if confirmingRemove { confirmingRemove = false; removeAction() }
+                        else { confirmingRemove = true }
+                    } label: {
+                        if confirmingRemove {
+                            Text("Remove?").font(.system(size: 13, weight: .medium))
+                        } else {
+                            Image(systemName: "xmark").font(.system(size: 12))
+                        }
+                    }
+                    .buttonStyle(HoverButtonStyle(compact: true))
+                    .foregroundStyle(confirmingRemove ? Noct.critText : (hovering ? Noct.ink3 : Noct.ink5))
+                    .overlay(confirmingRemove
+                             ? RoundedRectangle(cornerRadius: 7).stroke(Noct.crit.opacity(0.5), lineWidth: 1)
+                             : nil)
+                    .disabled(busy)
+                    .help(confirmingRemove ? "Click again to remove \(acc.email)" : "Remove")
+                    .accessibilityLabel(confirmingRemove ? "Confirm remove \(acc.email)" : "Remove \(acc.email)")
                 }
             }
         }
