@@ -11,6 +11,27 @@ import CbarCore
 /// attribute lookup moved, so a typealias reaches it on every SDK.
 typealias ViewState = SwiftUI.State
 
+/// Pointing-hand cursor while hovered. push/pop, not `set()`: a set cursor
+/// stayed a hand after its view went away, because a removed view gets no
+/// hover-end. Every push is popped — on hover end, on disappear, and when the
+/// control turns disabled under the pointer.
+struct PointerCursor: ViewModifier {
+    var active = true
+    @ViewState private var inside = false
+    @ViewState private var pushed = false
+    func body(content: Content) -> some View {
+        content
+            .onHover { inside = $0; sync() }
+            .onChange(of: active) { _, _ in sync() }
+            .onDisappear { inside = false; sync() }
+    }
+    private func sync() {
+        let want = inside && active
+        if want && !pushed { NSCursor.pointingHand.push(); pushed = true }
+        else if !want && pushed { NSCursor.pop(); pushed = false }
+    }
+}
+
 /// Button style with a hover wash + pressed state + pointer cursor.
 struct HoverButtonStyle: ButtonStyle {
     var compact = false
@@ -24,6 +45,9 @@ struct HoverButtonStyle: ButtonStyle {
         let configuration: ButtonStyleConfiguration
         let compact: Bool
         let font: Font?
+        /// A custom style is not dimmed by `.disabled` on its own; a busy
+        /// Switch that still looked live would read as a click that did nothing.
+        @Environment(\.isEnabled) private var enabled
         @ViewState private var hovering = false
         var body: some View {
             configuration.label
@@ -31,13 +55,13 @@ struct HoverButtonStyle: ButtonStyle {
                 .padding(.horizontal, compact ? 7 : 9)
                 .padding(.vertical, compact ? 3 : 5)
                 .background(RoundedRectangle(cornerRadius: 7)
-                    .fill(Color.primary.opacity(configuration.isPressed ? 0.18 : (hovering ? 0.10 : 0))))
+                    .fill(Color.primary.opacity(configuration.isPressed ? 0.18 : (hovering && enabled ? 0.10 : 0))))
+                .opacity(enabled ? 1 : 0.5)
                 .contentShape(RoundedRectangle(cornerRadius: 7))
-                .onHover { h in
-                    hovering = h
-                    if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                }
+                .onHover { hovering = $0 }
+                .modifier(PointerCursor(active: enabled))
                 .animation(.easeOut(duration: 0.12), value: hovering)
+                .animation(.easeOut(duration: 0.12), value: enabled)
                 .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
         }
     }
@@ -200,6 +224,7 @@ struct PopoverView: View {
                            switchMeter: codex ? (codexSwitchMeter(acc)?.id ?? "5h") : "5h",
                            isNextTarget: isNext,
                            canSwitch: canSwitch,
+                           busy: store.busy,
                            switchAction: { store.switchTo(acc) },
                            removeAction: canRemove ? { store.remove(acc) } : nil)
     }
@@ -221,13 +246,17 @@ struct PopoverView: View {
             Spacer(minLength: 4)
             statusPill
             Button { store.refresh() } label: {
+                // The arrow keeps its slot while the spinner shows, so the header
+                // does not shift by a point each time a pass starts and ends.
                 Image(systemName: "arrow.clockwise").font(.system(size: 16))
+                    .opacity(store.busy ? 0 : 1)
+                    .overlay { if store.busy { ProgressView().controlSize(.small) } }
             }
             .buttonStyle(HoverButtonStyle(compact: true))
             // Stale is the one time refreshing by hand is worth offering, so the
             // affordance brightens rather than sitting at chrome weight.
             .foregroundStyle(stale ? Noct.accentTextDim : Noct.ink4)
-            .help("Refresh")
+            .help(store.busy ? "Working…" : "Refresh")
         }
         .padding(.leading, 16)
         .padding(.trailing, 12)
@@ -369,6 +398,7 @@ struct PopoverView: View {
                     .foregroundStyle(Noct.ink3)
                 }
             }
+            .disabled(store.busy)
             .padding(.top, 5)
             .padding(.leading, -9)   // pull the buttons' own padding back to the text edge
         }
@@ -388,25 +418,30 @@ struct PopoverView: View {
                 Button { store.switchToBest() } label: {
                     Label("Switch to best", systemImage: "bolt.fill")
                 }
-                .foregroundStyle(canSwitchToBest ? Noct.accentText : Noct.ink6)
+                // ink4, not ink6: the style halves a disabled label's opacity,
+                // which lands it at about ink6.
+                .foregroundStyle(canSwitchToBest ? Noct.accentText : Noct.ink4)
                 .overlay(canSwitchToBest
                          ? RoundedRectangle(cornerRadius: 7).stroke(Noct.accentLine, lineWidth: 1)
                          : nil)
-                .disabled(!canSwitchToBest)
+                .disabled(!canSwitchToBest || store.busy)
                 Spacer(minLength: 4)
                 Button { store.addCurrent() } label: {
                     Label("Claude", systemImage: "plus")
                 }
                 .foregroundStyle(Noct.ink3)
+                .disabled(store.busy)
                 Button { store.addCodexAccount() } label: {
                     Label("Codex", systemImage: "plus")
                 }
                 .foregroundStyle(Noct.ink3)
+                .disabled(store.busy)
                 if store.canImportCswap {
                     Button { store.importCswap() } label: {
                         Label("cswap", systemImage: "square.and.arrow.down")
                     }
                     .foregroundStyle(Noct.ink3)
+                    .disabled(store.busy)
                 }
                 Button { NSApp.terminate(nil) } label: { Text("Quit") }
                     .foregroundStyle(Noct.ink3)
@@ -457,6 +492,9 @@ struct AccountCard: View {
     /// Whether the Switch button may show — decided by the panel, because the
     /// gate differs per provider.
     var canSwitch = false
+    /// A job is running on the store's queue; Switch and Remove would only
+    /// queue behind it with nothing to show for the click.
+    var busy = false
     let switchAction: () -> Void
     var removeAction: (() -> Void)? = nil
     @ViewState private var hovering = false
@@ -565,11 +603,13 @@ struct AccountCard: View {
                         .buttonStyle(HoverButtonStyle(compact: true, font: .system(size: 13)))
                         .foregroundStyle(Noct.accentText)
                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(Noct.accentLine, lineWidth: 1))
+                        .disabled(busy)
                 }
                 if let removeAction {
                     Button(action: removeAction) { Image(systemName: "xmark").font(.system(size: 12)) }
                         .buttonStyle(HoverButtonStyle(compact: true))
                         .foregroundStyle(hovering ? Noct.ink3 : Noct.ink5)
+                        .disabled(busy)
                 }
             }
         }

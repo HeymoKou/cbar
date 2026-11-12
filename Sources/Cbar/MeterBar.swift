@@ -57,6 +57,18 @@ struct ScanMeter: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // One element, read as "5h, 42 percent, resets in 1h 15m": the parts
+        // alone were a bare "5H", a bare number and an unlabelled bar.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(mark.map { "\($0.accessibilityName) \(label)" } ?? label)
+        .accessibilityValue(spokenValue)
+    }
+
+    private var spokenValue: String {
+        let pctText = "\(Int(pct.rounded())) percent"
+        guard let caption else { return pctText }
+        let spoken = caption.hasPrefix("reset in ") ? "resets in " + caption.dropFirst("reset in ".count) : caption
+        return "\(pctText), \(spoken)"
     }
 
     private var fill: Color {
