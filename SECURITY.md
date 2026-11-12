@@ -31,11 +31,32 @@ bounty.
 | The live Grok Build login cbar reads (and rewrites only to persist a token it just rotated, and only while `grok` is not running) | `~/.grok/auth.json` (Grok's own file) | `0600` |
 | The live Antigravity / `agy` login | Keychain, service `gemini`, account `antigravity` | Keychain ACL |
 
-No Claude token is ever written outside the Keychain. Codex logins are ~4 KB,
+No Claude token is ever written outside the Keychain. (Through 0.2.21 that was
+not true: requests went through `URLSession.shared`, whose disk cache kept the
+`Authorization` header in `~/Library/Caches/com.heymo.cbar/Cache.db`. Requests
+now use a session with no cache and no cookie store, and the old files are
+deleted at launch.) Codex logins are ~4 KB,
 too big for `security -i` (next section), so they are sealed on disk under a
 Keychain-held key instead: the files are useless without the key, and anyone
 who can read the key can read the logins — the same exposure the
 `security`-created items already have.
+
+## Where the binary comes from
+
+`brew install heymokou/tap/cbar` pours a bottle on Apple Silicon with macOS 15 or
+newer. That bottle is built by GitHub Actions in
+[HeymoKou/homebrew-tap](https://github.com/HeymoKou/homebrew-tap) from the tagged
+source tarball, whose sha256 is pinned in the formula; the bottle's own sha256 is
+pinned there too, and each one is published with a build attestation:
+
+```bash
+gh attestation verify "$(brew --cache heymokou/tap/cbar)" -R HeymoKou/homebrew-tap
+```
+
+So for a bottle install you are trusting that repository's CI as well as this
+source. The app is ad-hoc signed — there is no Developer ID behind it. To run
+only what you compiled yourself, `brew install --build-from-source
+heymokou/tap/cbar` or `./install.sh`.
 
 ## Known properties worth understanding
 

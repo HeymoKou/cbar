@@ -43,24 +43,36 @@ brew install heymokou/tap/cbar
 brew services start heymokou/tap/cbar   # run now + start at login
 ```
 
-Or without Homebrew: `./install.sh` builds `Cbar.app`, copies it to
-`~/Applications` and starts it at login. (`./build.sh` alone just produces the
-bundle.) Either way it builds from source on your machine, so nothing needs Apple
-signing or notarization. Needs the Swift toolchain — `xcode-select --install` is
-enough, full Xcode is not required.
+On Apple Silicon with macOS 15 or newer, brew pours a prebuilt bottle — nothing
+is compiled on your machine. The bottle is built by the
+[tap's CI](https://github.com/HeymoKou/homebrew-tap) from the tagged source and
+carries a build attestation ([SECURITY.md](SECURITY.md#where-the-binary-comes-from)).
+On macOS 14 or an Intel Mac brew builds from source instead, which needs the
+Swift toolchain — `xcode-select --install` is enough, full Xcode is not required.
+
+Or without Homebrew: `./install.sh` builds `Cbar.app` from this checkout, copies
+it to `~/Applications` and starts it at login. (`./build.sh` alone just produces
+the bundle.) No path needs Apple signing or notarization: the app is ad-hoc
+signed, and brew does not quarantine bottles.
 
 ## Accounts
 
-Log into an account in Claude Code, then click **Add current account**; cbar
-snapshots its credentials and profile. Repeat per account. Click an account to
-switch to it, or use the ✕ to remove one. If you already used cswap, cbar offers
-a one-time import from `~/.claude-swap-backup`.
+Log into an account in Claude Code, then choose **Add account › Claude — current
+login** in the footer; cbar snapshots its credentials and profile, after checking
+with the profile API that the token and `~/.claude.json` name the same account.
+Repeat per account. Click **Switch** on an account to switch to it, or ✕ and
+then **Remove?** to remove one. If you already used cswap, the same menu offers a
+one-time import from `~/.claude-swap-backup`.
+
+An account you switch to by hand stays put: pre-warm leaves it alone for as long
+as it is the active one. The 93% / 99% escape below still applies.
 
 ## Auto-switch
 
-Use the popover's **On / Off** radio buttons for **Claude auto-switch**,
-**Codex auto-switch**, and **Claude pre-warm**. Changes are saved immediately
-to the config file and survive restarts. Pre-warm switches Claude accounts
+Click the status pill in the popover's header (`AUTO 93% · WARM`) to open the
+settings: switches for **Claude auto-switch**, **Claude pre-warm**, **Codex
+auto-switch** and **Percent in the menu bar**. Changes are saved immediately to
+the config file and survive restarts. Pre-warm switches Claude accounts
 independently; turn both Claude controls off to stop automatic Claude switching.
 
 cbar switches away from the **active** account when either is true:
@@ -93,21 +105,21 @@ Until you add a Codex account, cbar shows a read-only Codex card from
 `~/.codex/sessions`. Adding accounts turns that into one card per account, each
 polled for usage the way `/status` reads it.
 
-**Add another Codex account** — footer **Codex** button, in this order:
+**Add another Codex account** — footer **Add account › Codex**, in this order:
 
-1. Click **Codex**. If the current login isn't saved yet, that click saves it
-   and the banner says so. Click **Codex** again.
+1. Choose **Add account › Codex**. If the current login isn't saved yet, that
+   saves it and the banner says so. Choose it again.
 2. cbar copies `CODEX_HOME="$HOME/.cbar/codex-login" codex login` to the
    clipboard (the banner shows the command).
 3. Paste and run **that** command in Terminal — **not** plain `codex login`.
 4. Log into the other ChatGPT account in the browser it opens.
-5. Click the refresh icon (or wait up to 60s). The new card appears.
+5. The new card appears as soon as the login finishes — cbar watches the folder.
 
 Don't log into a second account with plain `codex login`: it first **revokes**
 whatever login `~/.codex` holds, which kills the one cbar just saved. The one
 exception is re-logging the **active** account when its card says so — plain
-`codex login` is right there; any other account re-logs through the footer
-**Codex** button.
+`codex login` is right there; any other account re-logs through the footer's
+**Add account › Codex**.
 
 Click an account to switch. A switch rewrites `~/.codex/auth.json`, which Codex
 reads only when a process starts: a running `codex` keeps its account until
@@ -159,6 +171,7 @@ can change without notice, same disclaimer as Claude and Codex.
   "autoSwitchEnabled": true,
   "autoSwitchThreshold": 93,
   "codexAutoSwitchEnabled": false,
+  "menuBarPercent": true,
   "preWarmEnabled": true
 }
 ```
@@ -169,8 +182,10 @@ the key to `false` instead. Every decision is logged: `tail -f ~/.cbar/cbar.log`
 
 ## Behavior notes
 
-- **The menu-bar icon** is a plain glyph; hover it for the active Claude
-  account and its highest usage, or the last error. In the popover a bar turns
+- **The menu-bar icon** shows the active Claude account's 5h percent next to
+  the glyph (7d on a plan with no 5h window), red at the switch threshold or
+  when the account needs a re-login; `"menuBarPercent": false` hides it. Hover
+  for the account and its highest usage, or the last error. In the popover a bar turns
   red at 99%, and an account's data dims once it is over 10 min old.
 - **Rate limits.** The usage endpoint's budget is client-wide, not per-account,
   so each 60 s poll fetches exactly one account — the stalest. Backoff is
@@ -181,7 +196,7 @@ the key to `false` instead. Every decision is logged: `tail -f ~/.cbar/cbar.log`
 - **Switching is not a transaction.** It snapshots credentials and config first
   and rolls back on failure, but the Keychain write lands before the config
   write. A crash between the two can leave them disagreeing; recovery is
-  `/login` in Claude Code, then *Add current account*.
+  `/login` in Claude Code, then *Add account › Claude — current login*.
 
 Where tokens live, why cbar refuses to refresh one Claude Code might hold, and
 what `~/.cbar` exposes: **[SECURITY.md](SECURITY.md)**.
@@ -203,6 +218,7 @@ never touches your real Claude Code login.
 ```bash
 brew services stop heymokou/tap/cbar && brew uninstall heymokou/tap/cbar
 rm -rf ~/.cbar                                    # metadata, sealed Codex logins, caches, log
+rm -rf ~/Library/Caches/com.heymo.cbar ~/Library/HTTPStorages/com.heymo.cbar*   # left by 0.2.21 and older
 security delete-generic-password -s cbar          # once per stored Claude account
 security delete-generic-password -s cbar-codex    # the Codex login key
 ```
