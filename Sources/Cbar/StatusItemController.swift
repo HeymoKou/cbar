@@ -9,6 +9,7 @@ final class StatusItemController: NSObject {
     private var content: NSViewController?
     private var panel: NSPanel?
     private var monitor: Any?
+    private var keyMonitor: Any?
 
     /// Taken from the view rather than restated: these drifted apart once already
     /// (the panel stayed 340 when the popover went to 372) and the panel silently
@@ -48,16 +49,31 @@ final class StatusItemController: NSObject {
         self.panel = panel
         resizeAndAnchor(panel)
         panel.orderFrontRegardless()
+        // Key, so Esc reaches us (see `KeyPanel`). A LOCAL monitor because the
+        // key event is now delivered to this app: a global one only sees events
+        // bound for other apps, and for keys it needs Accessibility permission.
+        panel.makeKey()
+        removeMonitors()
         // Close on any click outside our app (status-item clicks stay local and
         // do not trigger this, so toggle keeps working without a reopen loop).
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.close()
         }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53 else { return event }   // kVK_Escape
+            self?.close()
+            return nil
+        }
     }
 
     private func close() {
         panel?.orderOut(nil)
+        removeMonitors()
+    }
+
+    private func removeMonitors() {
         if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
     }
 
     private func resizeAndAnchor(_ panel: NSPanel) {
@@ -78,7 +94,7 @@ final class StatusItemController: NSObject {
     }
 
     private func makePanel(content: NSViewController) -> NSPanel {
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: contentHeight),
+        let p = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: contentHeight),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: true)
         p.contentViewController = content
@@ -94,14 +110,45 @@ final class StatusItemController: NSObject {
         return p
     }
 
-    func render(tooltip: String) {
+    /// `title` is the active account's percent ("42%"), nil for the bare glyph.
+    /// `alert` reddens it: re-login needed, or at the switch threshold.
+    func render(tooltip: String, title: String? = nil, alert: Bool = false) {
+        guard let button = item.button else { return }
         // Template: system paints it white on a dark menu bar, black on light.
         let cfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
         let img = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
                           accessibilityDescription: "cbar")?
             .withSymbolConfiguration(cfg)
         img?.isTemplate = true
-        item.button?.image = img
-        item.button?.toolTip = tooltip
+        button.image = img
+        button.toolTip = tooltip
+        // Monospaced digits so the item does not change width as the number moves.
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        if let title {
+            button.imagePosition = .imageLeading
+            if alert {
+                // systemRed resolves against the menu bar's own appearance, so it
+                // reads on a light and a dark bar alike.
+                button.attributedTitle = NSAttributedString(string: title, attributes: [
+                    .font: font, .foregroundColor: NSColor.systemRed])
+            } else {
+                // A plain title, not an attributed one without a color: that
+                // would draw black on a dark menu bar. This keeps the bar's own
+                // text color, the way the template image keeps its.
+                button.font = font
+                button.title = title
+            }
+        } else {
+            button.title = ""
+            button.imagePosition = .imageOnly
+        }
     }
+}
+
+/// Borderless panels refuse key status by default, and a panel that is never
+/// key gets no key events — Esc went to whatever app was frontmost. Being a
+/// non-activating panel, it takes the keyboard while open without activating
+/// cbar or bringing anything forward, the way Spotlight's panel does.
+private final class KeyPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
 }

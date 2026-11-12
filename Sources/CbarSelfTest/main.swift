@@ -1375,6 +1375,8 @@ assert(FileManager.default.fileExists(atPath: seededPath), "seed wrote config.js
 // Round-trip through load(), not just the raw JSON: seeding a file the loader
 // can't read back would be the same invisible-default failure in a new costume.
 let seeded = CbarConfig.load(dir: cfgDir)
+let seededRaw = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: seededPath))) as! [String: Any]
+assert(seededRaw["menuBarPercent"] as? Bool == true, "the seeded file names menuBarPercent, so it can be found and turned off")
 assert(seeded.autoSwitchEnabled && seeded.preWarmEnabled && seeded.autoSwitchThreshold == 93,
        "seeded file round-trips to the defaults")
 // 0600: this file decides whether something rewrites the live login.
@@ -1392,6 +1394,8 @@ assert(edited.preWarmEnabled, "key absent from an edited file keeps the default"
 assert(!CbarConfig().codexAutoSwitchEnabled, "Codex auto-switch defaults OFF")
 assert(!seeded.codexAutoSwitchEnabled, "seeded file carries codexAutoSwitchEnabled: false, visibly")
 assert(!edited.codexAutoSwitchEnabled, "absent from an existing config → stays off on upgrade")
+assert(seeded.menuBarPercent && CbarConfig().menuBarPercent, "menu-bar percent defaults on, and is seeded")
+assert(edited.menuBarPercent, "absent from an existing config → on, without rewriting the file")
 try! Data("{\"codexAutoSwitchEnabled\":true}".utf8).write(to: URL(fileURLWithPath: seededPath))
 assert(CbarConfig.load(dir: cfgDir).codexAutoSwitchEnabled, "codexAutoSwitchEnabled: true is honored")
 // UI setting writes preserve unrelated values and round-trip independently.

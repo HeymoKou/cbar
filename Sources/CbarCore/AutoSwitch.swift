@@ -31,6 +31,10 @@ public struct CbarConfig {
     /// `codexSwitchMeter`).
     public var codexAutoSwitchEnabled: Bool = false
 
+    /// The active Claude account's 5h percent next to the menu-bar glyph. A
+    /// display preference only; off leaves the bare glyph.
+    public var menuBarPercent: Bool = true
+
     /// Defaults, for holding a value before the first poll has read the file.
     public init() {}
 
@@ -54,6 +58,7 @@ public struct CbarConfig {
             "autoSwitchThreshold": d.autoSwitchThreshold,
             "preWarmEnabled": d.preWarmEnabled,
             "codexAutoSwitchEnabled": d.codexAutoSwitchEnabled,
+            "menuBarPercent": d.menuBarPercent,
         ]
         guard let json = try? JSONSerialization.data(withJSONObject: o,
                                                      options: [.prettyPrinted, .sortedKeys]),
@@ -64,10 +69,13 @@ public struct CbarConfig {
         return true
     }
 
+    /// Every on/off key the panel's settings switches can flip. Raw value is
+    /// the config key.
     public enum SwitchSetting: String, CaseIterable {
         case claude = "autoSwitchEnabled"
         case codex = "codexAutoSwitchEnabled"
         case preWarm = "preWarmEnabled"
+        case menuBarPercent = "menuBarPercent"
     }
 
     public func isEnabled(_ setting: SwitchSetting) -> Bool {
@@ -75,6 +83,7 @@ public struct CbarConfig {
         case .claude: return autoSwitchEnabled
         case .codex: return codexAutoSwitchEnabled
         case .preWarm: return preWarmEnabled
+        case .menuBarPercent: return menuBarPercent
         }
     }
 
@@ -107,6 +116,7 @@ public struct CbarConfig {
         }
         if let p = o["preWarmEnabled"] as? Bool { c.preWarmEnabled = p }
         if let x = o["codexAutoSwitchEnabled"] as? Bool { c.codexAutoSwitchEnabled = x }
+        if let m = o["menuBarPercent"] as? Bool { c.menuBarPercent = m }
         return c
     }
 }
