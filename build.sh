@@ -5,9 +5,17 @@ cd "$(dirname "$0")"
 # The one place the version is written. It used to be typed into the plist below,
 # which is how the app came to report 0.1.0 while the repo was tagged v0.2.0.
 VERSION="$(tr -d '[:space:]' < VERSION)"
-# Build number has to increase monotonically for macOS, and commit count does that
-# for free. Homebrew builds from a tarball with no .git, hence the fallback.
-BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+# Build number has to increase monotonically for macOS. Derived from VERSION,
+# not the commit count: Homebrew builds from a tarball with no .git, so every
+# bottle shipped as build 1. major*10000 + minor*100 + patch (0.2.21 -> 221)
+# rises with every release and is already above any commit count a local
+# build used — as long as minor and patch stay under 100, which is checked.
+IFS=. read -r V_MAJOR V_MINOR V_PATCH <<<"$VERSION"
+if [ "$((10#$V_MINOR))" -ge 100 ] || [ "$((10#$V_PATCH))" -ge 100 ]; then
+    echo "build.sh: VERSION $VERSION has a part >= 100; widen the build-number scheme" >&2
+    exit 1
+fi
+BUILD="$((10#$V_MAJOR * 10000 + 10#$V_MINOR * 100 + 10#$V_PATCH))"
 
 # Extra flags are passed through so the Homebrew formula can build the same
 # bundle this script builds: it needs --disable-sandbox, and duplicating the
