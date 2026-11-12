@@ -15,6 +15,12 @@ final class UsageStore {
     /// threshold and the plots can draw it — no extra file read, this is the
     /// value `maybeAutoSwitch` already loads on every pass.
     private(set) var config = CbarConfig()
+    /// Jobs queued or running on `work`. A count, not a flag, so one finishing
+    /// does not clear another's spinner. Main thread only.
+    private var pendingJobs = 0
+    /// Something is queued or running on `work`: the panel spins Refresh and
+    /// holds the buttons that would queue more behind it.
+    var busy: Bool { pendingJobs > 0 }
 
     var onUpdate: (() -> Void)?
 
@@ -43,6 +49,10 @@ final class UsageStore {
     /// Display asleep, not the machine. Gates the timer tick rather than stopping
     /// it — see `pollsWhileDark`.
     private var screensAsleep = false
+    /// Watches the Codex login inbox so a finished `codex login` is imported
+    /// now rather than at the next poll (see `watchCodexInbox`).
+    private var inboxWatch: DispatchSourceFileSystemObject?
+    private var inboxDebounce: DispatchWorkItem?
 
     /// EVERY credential mutation runs here, one at a time. These paths used to
     /// take independent global-queue slots: the 60 s timer, opening the popover,
@@ -60,7 +70,7 @@ final class UsageStore {
     /// message, no log line, and no visible change, so the only symptom was the
     /// menu not doing anything.
     private func mutate(_ what: String, _ body: @escaping () throws -> Void) {
-        work.async { [weak self] in
+        enqueue { [weak self] in
             var err: String?
             do { try body() } catch {
                 // Words for the banner; the raw form, which names the type and
@@ -72,6 +82,21 @@ final class UsageStore {
             // refresh that follows every mutation assigns `lastError` itself, so
             // setting it first just means the user never sees it.
             self?.refresh(carrying: err)
+        }
+    }
+
+    /// Every job goes on `work` through here, so `busy` sees it from the moment
+    /// it is queued. Callable from any thread; the count only moves on main.
+    private func enqueue(_ job: @escaping () -> Void) {
+        if Thread.isMainThread { pendingJobs += 1 } else {
+            DispatchQueue.main.async { [weak self] in self?.pendingJobs += 1 }
+        }
+        work.async { [weak self] in
+            job()
+            // Lands after anything `job` put on main — the UI update, and a
+            // follow-up refresh's own +1 — so the count never dips to zero
+            // between a mutation and the refresh it hands off to.
+            DispatchQueue.main.async { self?.pendingJobs -= 1 }
         }
     }
 
@@ -106,10 +131,15 @@ final class UsageStore {
         // the first refresh, so pass one already sees the real settings.
         if CbarConfig.seedIfMissing() {
             CbarLog.write("wrote default ~/.cbar/config.json (auto-switch on, pre-warm on)")
+            // Once by construction: the seed only happens when there is no
+            // config. Both defaults rewrite the live login unasked, which a new
+            // user should hear from the app, not only from the README.
+            notice = "Auto-switch and pre-warm are on: cbar changes which account Claude Code is logged into, on its own. Click the AUTO pill at the top to turn them off."
         }
         config = CbarConfig.load()
         refresh()
         startTimer()
+        watchCodexInbox()
 
         // A dark display means nobody can read the icon, so a pass behind it is a
         // network request, four process spawns and a tree walk spent on nothing —
@@ -152,6 +182,47 @@ final class UsageStore {
         // that does. The closure captures `self` weakly, so a surviving timer
         // would not leak — it would just fire into nothing once a minute.
         stopTimer()
+        inboxDebounce?.cancel()
+        inboxWatch?.cancel()
+    }
+
+    /// `codex login` into the inbox used to wait for the next poll — up to 60 s
+    /// with a live token sitting in a plaintext file. A directory source fires
+    /// when an entry is added or removed; Codex creates `auth.json` and writes
+    /// it in one go, so a 1 s debounce lands after the write. The directory is
+    /// created here (0700, as `CodexLoginInbox.prepare` would) so there is
+    /// something to watch before the first Add.
+    private func watchCodexInbox() {
+        inboxWatch?.cancel()
+        inboxWatch = nil
+        let dir = codexInbox.dir
+        try? SecureFile.ensureDir(dir)
+        let fd = open(dir, O_EVTONLY)
+        guard fd >= 0 else {
+            CbarLog.write("codex login inbox: cannot watch \(dir) (errno \(errno)) — imports wait for the poll")
+            return
+        }
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
+                                                            eventMask: [.write, .delete, .rename],
+                                                            queue: .main)
+        src.setEventHandler { [weak self, weak src] in
+            guard let self, let src else { return }
+            // Deleted or moved: the fd now watches a directory nobody uses.
+            // Re-arm on a fresh one at the same path.
+            if !src.data.isDisjoint(with: [.delete, .rename]) { self.watchCodexInbox(); return }
+            self.inboxDebounce?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                // Only when there is a login to take. Importing empties the
+                // directory, which fires this again; that pass must not refresh.
+                guard let self, FileManager.default.fileExists(atPath: "\(dir)/auth.json") else { return }
+                self.refresh()
+            }
+            self.inboxDebounce = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: item)
+        }
+        src.setCancelHandler { close(fd) }
+        src.resume()
+        inboxWatch = src
     }
 
     private func startTimer() {
@@ -194,7 +265,7 @@ final class UsageStore {
     /// refresh itself hits — the user clicked a thing and it didn't work, and
     /// that is what they need told. Cleared by the next ordinary poll.
     func refresh(carrying: String? = nil) {
-        work.async { [weak self] in
+        enqueue { [weak self] in
             guard let self else { return }
             var accs: [Account] = []
             var err: String? = carrying
@@ -274,7 +345,7 @@ final class UsageStore {
         guard let acc = accounts.first(where: { $0.number == target && $0.provider == "claude" }) else { return }
         lastAutoSwitchAt = Date()   // prevent re-entry while the async switch runs
         CbarLog.write("auto-switch triggered → #\(target) \(acc.email) (\(reason))")
-        work.async { [weak self] in
+        enqueue { [weak self] in
             guard let self else { return }
             do {
                 try self.switcher.switchTo(target)
@@ -302,7 +373,7 @@ final class UsageStore {
         let pct = active.flatMap(codexSwitchMeter).map { "\($0.id)=\(Int($0.pct))%" } ?? "?"
         lastCodexSwitchAt = Date()
         CbarLog.write("codex auto-switch triggered #\(active?.number ?? 0) (\(pct)) → #\(target)")
-        work.async { [weak self] in
+        enqueue { [weak self] in
             guard let self else { return }
             do {
                 try self.codexSwitcher.switchTo(target)
@@ -395,7 +466,7 @@ final class UsageStore {
             if case .login(let live) = CodexLive.read(), codexStore.slot(for: live) == nil {
                 let n = try codexStore.add(live)
                 codexUsage.clearFailureState(n)
-                DispatchQueue.main.async { self?.notice = "Saved current Codex login (\(live.email ?? "#\(n)")). Click again to add another." }
+                DispatchQueue.main.async { self?.notice = "Saved current Codex login (\(live.email ?? "#\(n)")). Choose Add account › Codex again to add another." }
                 return
             }
             try codexInbox.prepare(importingInto: codexStore)
@@ -408,7 +479,7 @@ final class UsageStore {
                 1. Paste in Terminal (not plain `codex login` — that revokes the saved one):
                 \(cmd)
                 2. Log into the other ChatGPT account
-                3. Click Refresh — cbar imports it
+                3. cbar imports it as soon as the login finishes
                 """
             }
         }
