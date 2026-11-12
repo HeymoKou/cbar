@@ -1481,6 +1481,10 @@ do {
     assert(api.fetched == ["tok-new"], "fetch uses rotated token")
     assert(GrokAuth.read(path: grokAuthPath)?.accessToken == "tok-new", "rotation on disk")
     assert(a.first?.status == "ok" && Int(a.first?.meters.first?.pct ?? 0) == 34)
+    _ = svc.accounts(now: 1_800_000_010)
+    assert(api.fetched.count == 1, "fetched 10 s ago → served from the cache")
+    _ = svc.accounts(now: 1_800_000_040)
+    assert(api.fetched == ["tok-new", "tok-new"], "past 30 s → fetched again, with the persisted token")
 }
 try? FileManager.default.removeItem(atPath: grokAuthDir)
 print("GROK USAGE OK")
@@ -1544,8 +1548,9 @@ final class FakeAgyAPI: AntigravityAPI {
     var load = agyLoad
     var fetchError: Error?
     var refreshError: Error?
+    var tokens: [String] = []
     func loadCodeAssist(accessToken: String) throws -> Data {
-        loaded += 1
+        loaded += 1; tokens.append(accessToken)
         if let e = fetchError { throw e }
         return load
     }
@@ -1575,6 +1580,24 @@ do {
     assert(a.first?.status == "ok" && a.first?.email == "agy@x.com")
     assert(a.first?.org == "Google · Google AI Ultra")
     assert(a.first?.meters.first?.id == "7d")
+}
+// The Keychain token stays expired (cbar never writes it back), so the refreshed
+// one is kept in memory until it expires instead of refreshing every pass.
+do {
+    let cache = agyBinDir + "/cache-refresh.json"
+    let api = FakeAgyAPI()
+    let expired = AntigravityCreds(accessToken: "at-old", refreshToken: "rt-1",
+                                   expiry: Date(timeIntervalSince1970: 1_000), email: "agy@x.com")
+    let svc = AntigravityUsageService(client: api, creds: { expired },
+                                      oauthClient: { ("id", "secret") }, cachePath: cache)
+    _ = svc.accounts(now: 1_800_000_000)
+    assert(api.refreshed == 1 && api.tokens == ["at-new"], "expired → refreshed and used")
+    _ = svc.accounts(now: 1_800_000_010)
+    assert(api.loaded == 1, "fetched 10 s ago → served from the cache")
+    _ = svc.accounts(now: 1_800_000_040)
+    assert(api.refreshed == 1 && api.tokens == ["at-new", "at-new"], "refreshed token reused while it lives")
+    _ = svc.accounts(now: 1_800_003_600)
+    assert(api.refreshed == 2, "past its expiry → refreshed again")
 }
 let agyModels = Data(#"""
 {"models":{

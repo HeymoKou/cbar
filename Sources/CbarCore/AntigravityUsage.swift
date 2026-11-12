@@ -380,6 +380,10 @@ public final class AntigravityUsageService {
     private let creds: () -> AntigravityCreds?
     private let oauthClient: () -> (id: String, secret: String)?
     private let cachePath: String
+    /// The last refreshed access token, until it expires. The Keychain item is
+    /// never written back, so its token stays expired and every pass refreshed
+    /// again; keyed on the refresh token so a new login drops it.
+    private var refreshed: (access: String, expiry: Date, refreshToken: String)?
 
     public init(client: AntigravityAPI = AntigravityClient(),
                 creds: @escaping () -> AntigravityCreds? = { AntigravityAuth.read() },
@@ -396,14 +400,18 @@ public final class AntigravityUsageService {
     public func accounts(now: Double = Date().timeIntervalSince1970) -> [Account] {
         guard let live = creds() else { return [] }
         var row = loadCache() ?? Row()
+        if row.isFresh(now: now) { return [account(live, row, now: now)] }
         if let b = row.backoffUntil, now < b {
             return [account(live, row, now: now)]
         }
         row.lastAttemptAt = now
 
         var token = live.accessToken
-        if live.isExpired(now: Date(timeIntervalSince1970: now)) {
-            if let next = tryRefresh(live) {
+        let nowDate = Date(timeIntervalSince1970: now)
+        if live.isExpired(now: nowDate) {
+            if let c = refreshed, c.refreshToken == live.refreshToken, nowDate.addingTimeInterval(60) < c.expiry {
+                token = c.access
+            } else if let next = tryRefresh(live, now: now) {
                 token = next
             } else if row.lastError == "needs re-login" || row.needsReauth {
                 saveCache(row)
@@ -415,7 +423,8 @@ public final class AntigravityUsageService {
         do {
             try fetch(token: token, row: &row, now: now)
         } catch OAuthError.http(401, retryAfter: _) {
-            if let next = tryRefresh(live), next != token {
+            refreshed = nil
+            if let next = tryRefresh(live, now: now), next != token {
                 do {
                     try fetch(token: next, row: &row, now: now)
                 } catch {
@@ -456,11 +465,12 @@ public final class AntigravityUsageService {
         row.needsReauth = false; row.lastError = nil
     }
 
-    private func tryRefresh(_ live: AntigravityCreds) -> String? {
+    private func tryRefresh(_ live: AntigravityCreds, now: Double) -> String? {
         guard let pair = oauthClient() else { return nil }
         do {
             let r = try client.refresh(refreshToken: live.refreshToken,
                                        clientID: pair.id, clientSecret: pair.secret)
+            refreshed = (r.access, Date(timeIntervalSince1970: now + r.expiresIn), live.refreshToken)
             return r.access
         } catch OAuthError.needsReauth {
             return nil

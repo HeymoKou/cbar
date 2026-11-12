@@ -308,6 +308,12 @@ struct UsageRow: Codable {
     /// Grok / Antigravity plan name; never set (so never written) for Claude or Codex.
     var plan: String? = nil
 
+    /// Fetched within the last 30 s — `fetchPlan`'s `serveTTL`, for the
+    /// single-row services that don't go through it. A popover open, Refresh
+    /// and every mutation each start a pass; this keeps those from each
+    /// costing Grok and Antigravity another round of requests.
+    func isFresh(now: Double) -> Bool { fetchedAt.map { now - $0 < 30 } ?? false }
+
     /// A failed refresh or fetch. Every failure backs off, a dead credential
     /// included: without that its `fetchedAt` never advances, it stays the
     /// STALEST row forever and wins every `fetchPlan` pass — a needs-reauth #1

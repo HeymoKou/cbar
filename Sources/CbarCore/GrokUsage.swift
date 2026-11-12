@@ -251,6 +251,7 @@ public final class GrokUsageService {
     public func accounts(now: Double = Date().timeIntervalSince1970) -> [Account] {
         guard var login = GrokAuth.read(path: authPath) else { return [] }
         var row = loadCache() ?? Row()
+        if row.isFresh(now: now) { return [account(login, row, now: now)] }
         if let b = row.backoffUntil, now < b {
             return [account(login, row, now: now)]
         }
