@@ -108,7 +108,10 @@ public final class CodexProvider {
         var newestTimestamp: String?
         var planType: String?
         for line in content.split(separator: "\n").reversed() {
-            guard let data = line.data(using: .utf8),
+            // Most lines are messages and tool output, and a session runs to
+            // megabytes; a substring check is far cheaper than a JSON decode.
+            guard line.contains("\"rate_limits\""),
+                  let data = line.data(using: .utf8),
                   let row = try? dec.decode(Row.self, from: data),
                   let rl = row.payload?.rate_limits else { continue }
             let bucket = rl.limit_id ?? "codex"
