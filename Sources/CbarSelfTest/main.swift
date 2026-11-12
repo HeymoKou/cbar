@@ -1310,10 +1310,26 @@ try! Data(#"{"https://auth.x.ai::abc":{"key":"tok-1","refresh_token":"rt-1","exp
 let grokLogin = GrokAuth.read(path: grokAuthPath)
 assert(grokLogin?.email == "g@x.ai" && grokLogin?.accessToken == "tok-1" && grokLogin?.refreshToken == "rt-1")
 assert(grokLogin?.isExpired(now: Date(timeIntervalSince1970: 1_700_000_000)) == false)
-try GrokAuth.persistRefresh(access: "tok-2", refresh: "rt-2",
+try GrokAuth.persistRefresh(mapKey: grokLogin!.mapKey, access: "tok-2", refresh: "rt-2",
                             expiresAt: Date(timeIntervalSince1970: 2_000_000_000), path: grokAuthPath)
 let grokAfter = GrokAuth.read(path: grokAuthPath)
 assert(grokAfter?.accessToken == "tok-2" && grokAfter?.refreshToken == "rt-2", "rotation persisted")
+// Two top-level keys: the rotation lands in the entry the token was read from,
+// and the other entry is left byte-for-byte alone.
+try! Data(#"{"https://auth.x.ai::abc":{"key":"tok-1","refresh_token":"rt-1","expires_at":"2099-01-01T00:00:00Z","email":"g@x.ai"},"aaa-settings":{"theme":"dark"},"zzz-other":{"key":"","refresh_token":""}}"#.utf8)
+    .write(to: URL(fileURLWithPath: grokAuthPath))
+let grokTwo = GrokAuth.read(path: grokAuthPath)!
+assert(grokTwo.mapKey == "https://auth.x.ai::abc", "read picks the entry holding a token")
+try GrokAuth.persistRefresh(mapKey: grokTwo.mapKey, access: "tok-3", refresh: "rt-3",
+                            expiresAt: Date(timeIntervalSince1970: 2_000_000_000), path: grokAuthPath)
+let grokTwoRoot = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: grokAuthPath))) as! [String: Any]
+assert((grokTwoRoot["https://auth.x.ai::abc"] as? [String: Any])?["key"] as? String == "tok-3", "right entry rotated")
+assert((grokTwoRoot["aaa-settings"] as? [String: String]) == ["theme": "dark"], "other entry untouched")
+assert((grokTwoRoot["zzz-other"] as? [String: String]) == ["key": "", "refresh_token": ""], "other entry untouched")
+var grokMissingKey = false
+do { try GrokAuth.persistRefresh(mapKey: "gone", access: "x", refresh: nil, expiresAt: Date(), path: grokAuthPath) }
+catch { grokMissingKey = true }
+assert(grokMissingKey, "a vanished entry is an error, never a write into a different one")
 assert(GrokUsageService.shouldSkipRefresh(grokRunning: true))
 assert(!GrokUsageService.shouldSkipRefresh(grokRunning: false))
 final class FakeGrokAPI: GrokAPI {

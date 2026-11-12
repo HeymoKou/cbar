@@ -108,12 +108,15 @@ public enum GrokAuth {
 
     /// Persist a rotation into the live file. The refresh already spent the old
     /// token, so a dropped write is a dead login — callers must not `try?`.
-    public static func persistRefresh(access: String, refresh: String?, expiresAt: Date,
+    /// `mapKey` is the entry `read` took the token from: `root.keys.first` is in
+    /// no particular order, so with two entries it could write the rotation into
+    /// the other one and strand this login on its spent token.
+    public static func persistRefresh(mapKey key: String, access: String, refresh: String?, expiresAt: Date,
                                       path: String = defaultPath) throws {
         let url = URL(fileURLWithPath: path)
         guard let d = try? Data(contentsOf: url),
               var root = try JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let key = root.keys.first, var entry = root[key] as? [String: Any] else {
+              var entry = root[key] as? [String: Any] else {
             throw OAuthError.badResponse
         }
         entry["key"] = access
@@ -287,7 +290,7 @@ public final class GrokUsageService {
                 let r = try client.refresh(refreshToken: login.refreshToken, clientID: login.clientID)
                 let exp = Date(timeIntervalSince1970: now + r.expiresIn)
                 do {
-                    try GrokAuth.persistRefresh(access: r.access, refresh: r.refresh,
+                    try GrokAuth.persistRefresh(mapKey: login.mapKey, access: r.access, refresh: r.refresh,
                                                 expiresAt: exp, path: authPath)
                 } catch {
                     CbarLog.write("grok FAILED to persist rotated login: \(error) — needs re-login")
