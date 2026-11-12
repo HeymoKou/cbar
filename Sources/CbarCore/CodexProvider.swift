@@ -4,8 +4,7 @@ import Foundation
 /// Codex records a `token_count` event carrying `rate_limits` (primary = 5h,
 /// secondary = weekly) into `~/.codex/sessions/**/*.jsonl`. No API/token needed;
 /// data is as fresh as the last Codex run (surface the snapshot age).
-public final class CodexProvider: Provider {
-    public let name = "codex"
+public final class CodexProvider {
     private let sessionsDir: String
     private let walkTTL: TimeInterval
 
@@ -82,10 +81,6 @@ public final class CodexProvider: Provider {
               let m = a[.modificationDate] as? Date, let s = a[.size] as? NSNumber else { return nil }
         return FileStamp(mtime: m, size: s.intValue)
     }
-
-    // Read-only provider: switching is a cswap-only concept.
-    public func switchTo(_ account: Account) throws {}
-    public func switchToBest() throws {}
 
     /// The `limit` newest `.jsonl` files under the sessions tree, newest first, by
     /// file modification date.

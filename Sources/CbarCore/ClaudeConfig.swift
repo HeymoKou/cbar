@@ -84,22 +84,4 @@ public enum ClaudeConfig {
         let out = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
         try out.write(to: URL(fileURLWithPath: f), options: .atomic)   // a kill mid-write must not corrupt the login
     }
-
-    /// Replace only `oauthAccount` (4 identity fields), preserving all other keys. Nil fields are
-    /// written as JSON null (matching Claude Code's synthesized shape).
-    public static func spliceAccount(_ acc: OAuthAccount, at file: String? = nil) throws {
-        let f = file ?? path
-        let d = try Data(contentsOf: URL(fileURLWithPath: f))
-        guard var obj = try JSONSerialization.jsonObject(with: d) as? [String: Any] else {
-            throw NSError(domain: "cbar", code: 1, userInfo: [NSLocalizedDescriptionKey: "config not an object"])
-        }
-        obj["oauthAccount"] = [
-            "emailAddress": acc.emailAddress.map { $0 as Any } ?? NSNull(),
-            "accountUuid": acc.accountUuid.map { $0 as Any } ?? NSNull(),
-            "organizationUuid": acc.organizationUuid.map { $0 as Any } ?? NSNull(),
-            "organizationName": acc.organizationName.map { $0 as Any } ?? NSNull(),
-        ]
-        let out = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
-        try out.write(to: URL(fileURLWithPath: f))
-    }
 }

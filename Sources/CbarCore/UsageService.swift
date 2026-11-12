@@ -4,8 +4,7 @@ import Foundation
 /// a persisted cache. Rate-limit safe (fetch active + ≤1 stalest alternate per
 /// TTL, per-account backoff). Refreshes tokens as needed, but NEVER rotates the
 /// active account's token while Claude Code is running.
-public final class UsageService: Provider {
-    public let name = "claude"
+public final class UsageService {
     private let store: AccountStore
     private let oauth: OAuthClient
     private let cachePath: String
@@ -290,8 +289,8 @@ public final class UsageService: Provider {
     /// GREEN for 17 h while it was the active account (2026-07-25). A transient
     /// failure on the newest attempt does not demote a still-fresh reading.
     /// `freshFor` matches the 600 s icon-dim threshold on purpose. At 300 s a
-    /// harmless 429 flipped status to non-"ok", and `healthLevel` turns every
-    /// non-"ok" into `.crit` — so a rate-limited account showed solid red while
+    /// harmless 429 flipped status to non-"ok", and the icon then turned every
+    /// non-"ok" into crit — so a rate-limited account showed solid red while
     /// still looking bright and current. `isSwitchTarget` deliberately uses the
     /// same 600 s window, for its own reason (see there): a tighter gate goes
     /// blind during a 429 storm, which is exactly when switching matters.
@@ -301,9 +300,6 @@ public final class UsageService: Provider {
         if let f = fetchedAt, now - f <= freshFor, !meters.isEmpty { return "ok" }
         return lastError ?? "no data"
     }
-
-    public func switchTo(_ account: Account) throws {}   // handled by Switcher
-    public func switchToBest() throws {}
 
     /// Is Claude Code running? Gates the refresh guard above, so a FALSE NEGATIVE
     /// is the expensive direction: it lets cbar rotate a token Claude Code still

@@ -64,7 +64,7 @@ enum Noct {
     /// The same badge one step quieter — ACTIVE once the data has gone stale.
     static let accentFillDim = dynamic(light: 0xf1f0fe, dark: 0x2b2741)
 
-    // — crit (Nocturne `#db2e29`, which `Health.crit` above already is) —
+    // — crit (Nocturne `#db2e29`) —
     static let crit = dynamic(light: 0xc42824, dark: 0xdb2e29)
     /// Error prose. Nocturne lightens it for a dark ground; light needs the
     /// opposite move or the text dissolves into the tint behind it.

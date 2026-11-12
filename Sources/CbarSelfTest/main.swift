@@ -38,30 +38,6 @@ if CommandLine.arguments.contains("--import-cswap") {
 // run against the REAL store and must keep logging.
 setenv("CBAR_LOG_SILENT", "1", 1)
 
-// health rules + aggregation (Accounts built directly; no cswap)
-assert(healthLevel(pct: 100, status: "ok") == .crit)
-assert(healthLevel(pct: 70, status: "ok") == .warn)
-assert(healthLevel(pct: 10, status: "ok") == .healthy)
-assert(healthLevel(pct: 10, status: "rate_limited") == .crit)
-let ha = [
-    Account(id: "a", number: 1, email: "a", org: "", isActive: false, status: "ok",
-            meters: [Meter(id: "5h", pct: 100, countdown: nil)], ageSeconds: 5, provider: "claude"),
-    Account(id: "b", number: 2, email: "b", org: "", isActive: true, status: "ok",
-            meters: [Meter(id: "5h", pct: 10, countdown: nil)], ageSeconds: 5, provider: "claude"),
-]
-assert(overallHealth(ha) == .crit, "worst account at 100% -> crit")
-// icon uses ACTIVE account only: #1 (100%) inactive, #2 (10%) active → healthy
-assert(activeHealth(ha) == .healthy, "icon = active(#2 10%) health, ignores maxed inactive #1")
-let haCrit = [
-    Account(id: "a", number: 1, email: "a", org: "", isActive: false, status: "ok", meters: [Meter(id: "5h", pct: 5, countdown: nil)], ageSeconds: 5, provider: "claude"),
-    Account(id: "b", number: 2, email: "b", org: "", isActive: true, status: "ok", meters: [Meter(id: "5h", pct: 90, countdown: nil)], ageSeconds: 5, provider: "claude"),
-]
-assert(activeHealth(haCrit) == .crit, "active at 90% → crit")
-assert(anyStale(ha) == false, "fresh")
-assert(anyStale([Account(id: "c", number: 3, email: "c", org: "", isActive: false, status: "ok",
-                         meters: [], ageSeconds: 700, provider: "claude")]) == true, "stale > 600")
-print("HEALTH OK")
-
 // Codex session rate-limit parsing (local jsonl, no API).
 let codexLine = #"{"timestamp":"2026-07-09T16:37:40.997Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":5.0,"window_minutes":300,"resets_at":2000003600},"secondary":{"used_percent":12.0,"window_minutes":10080,"resets_at":2000090000},"plan_type":"team"}}}"#
 let cx = CodexProvider.parse(codexLine, now: 2000000000)
@@ -271,7 +247,7 @@ print("PROFILE MAP OK")
 let tmp = NSTemporaryDirectory() + "cbar-cfg-\(ProcessInfo.processInfo.processIdentifier).json"
 let original = #"{"numStartups":42,"oauthAccount":{"emailAddress":"old@x.com","organizationUuid":"O1"},"projects":{"/a":{"x":1}},"telemetry":true}"#
 try! original.write(toFile: tmp, atomically: true, encoding: .utf8)
-try! ClaudeConfig.spliceAccount(.init(emailAddress: "new@y.com", accountUuid: "U2", organizationUuid: "O2", organizationName: "Org"), at: tmp)
+try! ClaudeConfig.spliceRawAccount(["emailAddress": "new@y.com", "accountUuid": "U2", "organizationUuid": "O2", "organizationName": "Org"], at: tmp)
 let after = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: tmp))) as! [String: Any]
 assert((after["numStartups"] as? Int) == 42, "preserve numStartups")
 assert((after["telemetry"] as? Bool) == true, "preserve telemetry")
@@ -283,7 +259,7 @@ assert(reread.emailAddress == "new@y.com" && reread.accountUuid == "U2")
 // Identical byte count, different identity: `readAccount` caches its parse, and
 // keying that cache on size alone would serve the previous account here — which
 // on a real switch means cbar reconciling against the login it just replaced.
-try! ClaudeConfig.spliceAccount(.init(emailAddress: "new@z.com", accountUuid: "U3", organizationUuid: "O3", organizationName: "Org"), at: tmp)
+try! ClaudeConfig.spliceRawAccount(["emailAddress": "new@z.com", "accountUuid": "U3", "organizationUuid": "O3", "organizationName": "Org"], at: tmp)
 let sameSize = try! ClaudeConfig.readAccount(at: tmp)!
 assert(sameSize.emailAddress == "new@z.com" && sameSize.accountUuid == "U3", "equal-size rewrite must invalidate the read cache")
 // full oauthAccount splice preserves other top-level keys + replaces all oauth fields
@@ -1446,8 +1422,6 @@ var grokMissingKey = false
 do { try GrokAuth.persistRefresh(mapKey: "gone", access: "x", refresh: nil, expiresAt: Date(), path: grokAuthPath) }
 catch { grokMissingKey = true }
 assert(grokMissingKey, "a vanished entry is an error, never a write into a different one")
-assert(GrokUsageService.shouldSkipRefresh(grokRunning: true))
-assert(!GrokUsageService.shouldSkipRefresh(grokRunning: false))
 final class FakeGrokAPI: GrokAPI {
     var fetched: [String] = []
     var refreshedWith: [String] = []

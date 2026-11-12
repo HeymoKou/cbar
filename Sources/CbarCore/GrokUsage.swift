@@ -267,10 +267,6 @@ public final class GrokUsageService {
         UsageService.pgrepMatches(["-x", "grok"])
     }
 
-    /// Refreshing rotates. Skip when grok is alive — a false negative here is
-    /// the expensive direction (revoking the family grok still holds).
-    public static func shouldSkipRefresh(grokRunning: Bool) -> Bool { grokRunning }
-
     public func accounts(now: Double = Date().timeIntervalSince1970) -> [Account] {
         guard var login = GrokAuth.read(path: authPath) else { return [] }
         var row = loadCache() ?? Row()
@@ -280,7 +276,9 @@ public final class GrokUsageService {
         row.lastAttemptAt = now
 
         if login.isExpired(now: Date(timeIntervalSince1970: now)) {
-            if Self.shouldSkipRefresh(grokRunning: grokRunning()) {
+            // Refreshing rotates. Skip when grok is alive — a false negative here
+            // is the expensive direction (revoking the family grok still holds).
+            if grokRunning() {
                 row.lastError = "token expired (Grok owns it)"
                 row.backoffUntil = now + CodexUsageService.skipBackoff
                 saveCache(row)
